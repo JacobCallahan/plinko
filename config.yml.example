@@ -1,0 +1,14 @@
+# Plinko's config file using Simple Config
+debug: False
+allow_dupes: False
+behavior: "minimal"
+max_depth: 5
+# This should probably be changed...
+name: "hammer"
+# The config will pull in any environment variable with this prefix
+envar_prefix: "PLINKO_"
+# The naming styles you expect to find in the target test repository
+# example_names -> ExampleName - Note how the trailing "s" was also stripped
+class_name_style: "ExampleName"
+# example-names -> example_name
+method_name_style: "example_name"

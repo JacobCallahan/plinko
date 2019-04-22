@@ -83,58 +83,13 @@ def find_test_match(feature, method, test_dict, interface=None, max_res=3):
         return None
 
 
-def plinko_to_ptcommand(plinko_results, allow_dupes=False):
-    """Convert plinko-identified tests into pytest arguments"""
-    pytest_list = []
-    with click.progressbar(
-        plinko_results, label="Converting results to pytest command"
-    ) as plink_res:
-        for feature in plink_res:
-            file_name = list(feature[1].keys())[0]
-            if isinstance(feature[1][file_name], dict):  # unittest style
-                for test_class in feature[1][file_name].keys():
-                    for test in feature[1][file_name][test_class]:
-                        pytest_list.append(f"{file_name}::{test_class}::{test}")
-            else:
-                for test in feature[1][file_name]:
-                    pytest_list.append(f"{file_name}::{test}")
-        if not allow_dupes:
-            pytest_list = set(pytest_list)
-            logger.info(f"Found {len(pytest_list)} unique tests.")
-    return f"pytest -v {' '.join(pytest_list)}"
-
-
-def flatten_mixed(data, outlist=None, parents=""):
-    """Flatten a data structure of nested lists and dicts into a single list"""
-    if outlist is None:
-        outlist = []
-    if isinstance(data, dict):
-        [
-            flatten_mixed(children, outlist, f"{parents} {key}")
-            for key, children in data.items()
-        ]
-    elif isinstance(data, list):
-        [flatten_mixed(child, outlist, parents) for child in data]
-    else:
-        outlist.append(f"{parents} {data}".strip())
-    return outlist
-
-
 def plink_clix(diff_path, pt_export_path):
     """Parse a clix version/diff dict and find any matching tests"""
-    if "comp-diff" not in diff_path and "-comp.yaml" not in diff_path:
-        logger.warning(
-            "Incorrect diff format. Rerun CLIx's diff/explore with the --compact option"
-        )
-        return
-    diff_dict = helpers.import_yaml(diff_path)
+    diff_dict = helpers.get_dict_diff(diff_path)
     pt_dict = pyt_collect_to_dict(pt_export_path)
     if not diff_dict or not pt_dict:
         logger.warning("Please check supplied files for clix-diff and pytest-export...")
         return
-    if "-comp.yaml" in diff_path:
-        diff_dict = {"buffer": diff_dict}
-    diff_dict = flatten_mixed(list(diff_dict.values()))
     logger.debug(diff_dict)
     plink_results = {"found": [], "missing": []}
     with click.progressbar(diff_dict, label="Finding test matches") as d_dict:
@@ -154,19 +109,11 @@ def plink_clix(diff_path, pt_export_path):
 
 def plink_apix(diff_path, pt_export_path):
     """Parse an apix version/diff dict and find any matching tests"""
-    if "comp-diff" not in diff_path and "-comp.yaml" not in diff_path:
-        logger.warning(
-            "Incorrect diff format. Rerun APIx's diff/explore with the --compact option"
-        )
-        return
-    diff_dict = helpers.import_yaml(diff_path)
+    diff_dict = helpers.get_dict_diff(diff_path)
     pt_dict = pyt_collect_to_dict(pt_export_path)
     if not diff_dict or not pt_dict:
-        logger.warning("Please check supplied files for apix-diff and pytest-export...")
+        logger.warning("Please check supplied files for clix-diff and pytest-export...")
         return
-    if "-comp.yaml" in diff_path:
-        diff_dict = {"buffer": diff_dict}
-    diff_dict = flatten_mixed(list(diff_dict.values()))
     logger.debug(diff_dict)
     plink_results = {"found": [], "missing": []}
     with click.progressbar(diff_dict, label="Finding test matches") as d_dict:
