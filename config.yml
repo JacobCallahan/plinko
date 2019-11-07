@@ -12,3 +12,5 @@ envar_prefix: "PLINKO_"
 class_name_style: "ExampleName"
 # example-names -> example_name
 method_name_style: "example_name"
+# Specify how aggressively Plinko should search for entity names. (low, med, high)
+search_aggressiveness: "high"

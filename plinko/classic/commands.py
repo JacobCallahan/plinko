@@ -25,7 +25,7 @@ from plinko import logger as plog
     type=click.Path(exists=True, dir_okay=False),
 )
 @click.option("--allow-dupes", help="Allow multiples of the same test.", is_flag=True)
-def classic(clix_diff, apix_diff, pytest_export):
+def classic(clix_diff, apix_diff, pytest_export, allow_dupes):
     if not pytest_export:
         logger.warning("You must provide a pytest --collect-only output file.")
         return

@@ -237,7 +237,8 @@ class CodeParser:
                     # test for the method being a member of a module. module.method()
                     for module in line_parser.interests["module_accessed"]:
                         # We need to resolve uses of self and cls
-                        if module in ["self", "cls"]:
+                        if module in ["self", "cls"] and self.classes.get(class_name):
+                            #  logger.warning(f"class name: {class_name}, meth call: {meth_call}")
                             if class_name and meth_call in self.classes[class_name]["methods"]:
                                 module = class_name
                             elif class_name and self.classes[class_name]["bases"]:
@@ -442,8 +443,8 @@ class CodeParser:
                 continue
             for call in self.methods[method].get("calls", []):
                 call_cov = self.import_manager.get_methods(call)
-                if call_cov and call_cov.get("coverage"):
-                    self.methods[method]["coverage"].append(call_cov)
+                if isinstance(call_cov, dict) and call_cov.get("covers"):
+                    self.methods[method]["covers"].append(call_cov)
             try:
                 compiled_coverage[method] = get_coverage(method, self.methods)
             except RecursionError:

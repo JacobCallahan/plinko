@@ -106,4 +106,3 @@ venv.bak/
 #plinko-specific
 logs/*
 projects/*
-config.yml
