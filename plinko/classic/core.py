@@ -85,7 +85,7 @@ def find_test_match(feature, method, test_dict, interface=None, max_res=3):
 
 def plink_clix(diff_path, pt_export_path):
     """Parse a clix version/diff dict and find any matching tests"""
-    diff_dict = helpers.get_dict_diff(diff_path)
+    diff_dict = helpers.get_diff_dict(diff_path)
     pt_dict = pyt_collect_to_dict(pt_export_path)
     if not diff_dict or not pt_dict:
         logger.warning("Please check supplied files for clix-diff and pytest-export...")
@@ -109,7 +109,7 @@ def plink_clix(diff_path, pt_export_path):
 
 def plink_apix(diff_path, pt_export_path):
     """Parse an apix version/diff dict and find any matching tests"""
-    diff_dict = helpers.get_dict_diff(diff_path)
+    diff_dict = helpers.get_diff_dict(diff_path)
     pt_dict = pyt_collect_to_dict(pt_export_path)
     if not diff_dict or not pt_dict:
         logger.warning("Please check supplied files for clix-diff and pytest-export...")
