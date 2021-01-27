@@ -10,6 +10,9 @@ from logzero import logger
 class SimpleConfig:
     def __init__(self, **kwargs):
         self._cfg_file = Path(kwargs.get("cfg_file", "config.yml"))
+        cfg_path = Path(os.environ.get("PLINKO_DIRECTORY", "")).absolute()
+        print(cfg_path)
+        self._cfg_file = cfg_path.joinpath(self._cfg_file)
         self._load_config()
         self._pull_envars()
 

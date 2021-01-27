@@ -302,8 +302,15 @@ class CodeParser:
         """Parse a file, bringing in all the high level items"""
         logger.info(f"Starting to parse {self.code_file}")
         file_ast = None
+        if not Path(self.code_file).exists():
+            logger.warning(f"{self.code_file} does not exist!")
+            return
         with Path(self.code_file).open() as py_file:
-            file_ast = ast.parse(py_file.read())
+            try:
+                file_ast = ast.parse(py_file.read())
+            except UnicodeDecodeError:
+                logger.warning(f"Unable to parse {self.code_file}")
+                return
         # move through all high level nodes
         ast.FunctionDef
         ast.ClassDef
@@ -340,16 +347,12 @@ class CodeParser:
         if self._curr_depth >= self.max_depth:
             logger.debug(f"Max depth of {self.max_depth} has been reached!")
             return
-        # first try to see if we can get the code for the import
-        # code = self.import_manager.get_source(import_name)
-        # if code:
-        #     self._parse_general(ast.parse(code))
-        #     return
-
         # if not, try to fall back to the file itself
         file_path = self.import_manager.get_file(import_name)
         if not file_path or file_path in code_parser.PARSED_FILES:
+            # logger.error(f'No file for {import_name}: tried: {file_path}')
             return
+        # logger.error(f'Found file for {import_name}: {file_path}')
         # pass the file on to a new parser
         py_parser = CodeParser(
             code_file=file_path,
@@ -364,6 +367,7 @@ class CodeParser:
             self.import_manager.add_methods(import_name, py_parser.methods[import_name].copy())
             self.methods[import_name] = py_parser.methods[import_name].copy()
         else:
+            logger.error(f"{import_name} not in {py_parser.methods}")
             for meth, contents in py_parser.methods.items():
                 if import_name in meth:
                     self.import_manager.add_methods(import_name, contents.copy())

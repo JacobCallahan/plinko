@@ -1,10 +1,14 @@
 # -*- encoding: utf-8 -*-
 """Module handling internal and dependency logging."""
 import logging
+import os
+from pathlib import Path
 import logzero
 
 
 def setup_logzero(level="info", path="logs/plinko.log"):
+    plinko_path = Path(os.environ.get("PLINKO_DIRECTORY", "")).absolute()
+    path = str(plinko_path.joinpath(path))
     log_fmt = "%(color)s[%(levelname)s %(asctime)s]%(end_color)s %(message)s"
     if level == "debug":
         level = logging.DEBUG
