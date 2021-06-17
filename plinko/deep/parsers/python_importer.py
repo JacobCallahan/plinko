@@ -120,6 +120,8 @@ class ImportManager:
             )
             return
         logger.debug(f"Attempting to import {true_import}")
+        # print(f"Attempting to import {true_import}")
+        # breakpoint()
         try:
             mod_spec = util.find_spec(true_import.replace(" ", "."))
         except ModuleNotFoundError:
@@ -141,6 +143,7 @@ class ImportManager:
                 working = True if mod_spec else False
                 logger.debug(mod_spec)
                 # logger.debug(f"mod spec 2 {mod_spec}")
+        print(mod_spec or true_import)
         if mod_spec is None:
             self.known_imports[import_name]["location"] = "~bad~"
             logger.warning(
