@@ -15,7 +15,7 @@ from uuid import uuid4
 
 from logzero import logger
 from plinko import helpers
-from plinko.deep.parsers import python_parser
+from plinko.parsers import python_parser
 from plinko.simple_config import config
 
 PARSED_FILES = []  # This global will help to reduce multiplication of effort

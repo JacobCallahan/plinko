@@ -147,7 +147,8 @@ class ImportManager:
         if mod_spec is None:
             self.known_imports[import_name]["location"] = "~bad~"
             logger.warning(
-                f"Unable to import {true_import}. Make sure it is installed."
+                f"Unable to import {true_import}. Make sure it is installed.\n"
+                f"{mod_spec=}, {sub_imports=}, {true_import=}, {call_path=}"
             )
             return
         # logger.debug(f"mod spec origin 1 {mod_spec.origin}")

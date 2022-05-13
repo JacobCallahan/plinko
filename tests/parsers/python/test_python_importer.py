@@ -1,5 +1,5 @@
 """This module exercises the python_importer's ImportManager class"""
-from plinko.deep.parsers.python_importer import ImportManager
+from plinko.parsers.python_importer import ImportManager
 
 
 def test_positive_register():
@@ -10,8 +10,8 @@ def test_positive_register():
 
 def test_positive_import_first_party():
     im_inst = ImportManager()
-    assert im_inst.get_file("plinko.deep.parsers.python_parser")
-    assert im_inst.get_source("plinko.deep.parsers.python_parser")
+    assert im_inst.get_file("plinko.parsers.python_parser")
+    assert im_inst.get_source("plinko.parsers.python_parser")
 
 
 def test_positive_import_third_party():
