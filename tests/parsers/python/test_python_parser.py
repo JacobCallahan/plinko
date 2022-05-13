@@ -1,5 +1,5 @@
 from plinko import helpers
-from plinko.deep import code_parser
+from plinko import code_parser
 
 # def test_robottelo_api():
 #     CliRunner().invoke(entry_point, [

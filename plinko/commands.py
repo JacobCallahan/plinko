@@ -5,7 +5,7 @@ from logzero import logger
 from plinko import helpers
 from plinko import logger as plog
 from plinko.simple_config import config
-from plinko.deep import code_parser
+from plinko import code_parser
 
 
 @click.command()

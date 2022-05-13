@@ -7,8 +7,8 @@ from pathlib import Path
 
 from astunparse import unparse
 from logzero import logger
-from plinko.deep import code_parser
-from plinko.deep.parsers import python_importer
+from plinko import code_parser
+from plinko.parsers import python_importer
 from plinko.helpers import gen_variants, get_coverage, write_to_file
 
 
