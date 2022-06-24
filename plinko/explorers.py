@@ -1,11 +1,10 @@
-# -*- encoding: utf-8 -*-
-"""A collection of methods to assist in handling product explorers"""
+"""A collection of methods to assist in handling product explorers."""
 
 
 def flatten_clix_diff(clix_diff):
     compiled = []
     if isinstance(clix_diff, dict):
-        for key in clix_diff.keys():
+        for key in clix_diff:
             for item in clix_diff[key]:
                 res = flatten_clix_diff(item)
                 if isinstance(res, list):
@@ -50,7 +49,7 @@ def plink_clix(diff_path, pt_export_path):
 def flatten_apix_diff(apix_diff):
     compiled = []
     if isinstance(apix_diff, dict):
-        for key in apix_diff.keys():
+        for key in apix_diff:
             for item in apix_diff[key]:
                 res = flatten_apix_diff(item)
                 if isinstance(res, list):

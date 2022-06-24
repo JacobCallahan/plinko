@@ -1,11 +1,11 @@
 import ast
 import builtins
-import importlib
-import inspect
-from astunparse import unparse
-from importlib import util  # A python bug makes this necessary
+import collections
+import sys
+
 from logzero import logger
-from plinko.helpers import get_coverage
+
+from plinko.parsers.source_finder import find_file_from_import
 
 BUILTINS = dir(builtins)
 
@@ -14,10 +14,16 @@ class ImportManager:
     known_imports = {}  # {name: {import location:, methods:, ast:}
 
     def __init__(self):
-        pass
+        # nothing in the stdlib provides coverage
+        for name in sys.stdlib_module_names:
+            self.known_imports[name] = {
+                "location": "stdlib",
+                "coverage": None,
+                "methods": None,
+            }
 
     def _find_import(self, import_name):
-        """Given an import name, try to find it and return the known key"""
+        """Given an import name, try to find it and return the known key."""
         if import_name in self.known_imports:
             return import_name
         for key, val in self.known_imports.items():
@@ -25,7 +31,7 @@ class ImportManager:
                 return key
 
     def register(self, import_name, module_name=None, real_name=None):
-        """Add a new import if it isn't already known"""
+        """Add a new import if it isn't already known."""
         if import_name not in self.known_imports:
             self.known_imports[import_name] = {
                 "module_name": module_name,
@@ -38,59 +44,40 @@ class ImportManager:
         elif not self.known_imports.get(import_name, {}).get("location"):
             self.import_module(import_name)
         file = self.known_imports.get(import_name, {}).get("location")
-        if not file in ["stdlib", "~bad~"]:
+        if file not in ("stdlib", "~bad~"):
             return file
 
-    def get_source(self, import_name):
+    def get_ast(self, import_name):
         if not self._find_import(import_name):
             self.import_module(import_name)
-        return self.known_imports.get(import_name, {}).get("source")
+        return self.known_imports.get(import_name, {}).get("ast")
 
     def add_methods(self, import_name, methods):
         if not self._find_import(import_name):
             self.import_module(import_name)
-        self.known_imports[import_name]["methods"] = methods
+        if methods:
+            if isinstance(methods, collections.abc.Iterable):
+                self.known_imports[import_name].setdefault("methods", set()).update(methods)
+            else:
+                self.known_imports[import_name].setdefault("methods", set()).add(methods)
 
     def get_methods(self, import_name):
         if not self._find_import(import_name):
             self.import_module(import_name)
         return self.known_imports.get(import_name, {}).get("methods")
 
-    @staticmethod
-    def better_getsource(live_object):
-        """Uses inspect's getsource, but strips extra indentation"""
-        try:
-            raw_source = inspect.getsource(live_object)
-        except (TypeError, OSError):
-            logger.debug(
-                f"Can't get the source from non-supported object: {live_object}"
-            )
-            return
-        whitespace, pos = True, 0
-        while whitespace:
-            if raw_source[pos] == " ":
-                pos += 1
-            else:
-                whitespace = False
-        if pos == 0:
-            """no adjustment needed!"""
-            return raw_source
-        else:
-            return "\n".join([line[pos:] for line in raw_source.splitlines()])
-
     def resolve_import(self, import_name, call_path=None):
-        """Attempt to resolve an import, returning the most beneficial information"""
+        """Attempt to resolve an import, returning the most beneficial information."""
         # First, return if we already know the import contents
         if self.known_imports[import_name].get("coverage") or self.known_imports[
             import_name
         ].get("ast"):
             return
         if self.known_imports[import_name].get("location") == "~bad~":
-            # known bad import
-            return
+            return  # known bad import
         # make sure this isn't an uncaught builtin object
         if import_name in BUILTINS:
-            logger.debug(f"{import_name} is a python builtin. Ignoring.")
+            logger.debug(f"{import_name} is a python builtin; ignoring.")
             self.known_imports[import_name] = {
                 "location": "~bad~",
                 "coverage": None,
@@ -114,81 +101,23 @@ class ImportManager:
                 real_name = call_path.replace(" ", ".")
             true_import += "." + real_name
         # logger.debug(f"true import 2 {true_import}")
-        if ".." in true_import:
-            logger.warning(
-                f"Unable to import {true_import}. Relative imports are not currently supported."
-            )
-            return
-        logger.debug(f"Attempting to import {true_import}")
-        # print(f"Attempting to import {true_import}")
-        # breakpoint()
         try:
-            mod_spec = util.find_spec(true_import.replace(" ", "."))
+            source_file = find_file_from_import(true_import.replace(" ", "."))
         except ModuleNotFoundError:
-            mod_spec = None
-        logger.debug(mod_spec)
-        sub_imports = []  # just in case the full path doesn't work
-        # logger.debug(f"mod spec 1 {mod_spec}")
-        if not mod_spec:
-            # import didn't work, let's try higher levels
-            working = False
-            while not working and "." in true_import:
-                temp_split = true_import.split(".")
-                sub_imports.insert(0, temp_split.pop(-1))
-                true_import = ".".join(temp_split)
-                try:
-                    mod_spec = util.find_spec(true_import.replace(" ", "."))
-                except ModuleNotFoundError:
-                    mod_spec = None
-                working = True if mod_spec else False
-                logger.debug(mod_spec)
-                # logger.debug(f"mod spec 2 {mod_spec}")
-        print(mod_spec or true_import)
-        if mod_spec is None:
+            source_file = None
+        logger.debug(source_file or true_import)
+        if source_file is None:
             self.known_imports[import_name]["location"] = "~bad~"
             logger.warning(
                 f"Unable to import {true_import}. Make sure it is installed.\n"
-                f"{mod_spec=}, {sub_imports=}, {true_import=}, {call_path=}"
+                f"{true_import=}, {call_path=}"
             )
             return
-        # logger.debug(f"mod spec origin 1 {mod_spec.origin}")
-        if mod_spec.origin and ("site-packages" in mod_spec.origin or "/user/lib" not in mod_spec.origin):
-            # this is something user-installed
-            temp_import = importlib.import_module(true_import)
-            # logger.debug(f"temp import 1 {temp_import}")
-            if sub_imports:
-                # we have to dig down to get the code we want
-                for sub in sub_imports:
-                    if sub in dir(temp_import):
-                        temp_import = temp_import.__dict__.get(sub)
-                        self.known_imports[import_name][
-                            "source"
-                        ] = self.better_getsource(temp_import)
-                        # logger.debug(
-                        #     f"retrieved source {self.known_imports[import_name]['source']}"
-                        # )
-                    else:
-                        logger.warning(
-                            f"Unable to import {real_name}. Make sure it is installed."
-                        )
-                        return
-            else:
-                # we are already at the level we need
-                self.known_imports[import_name]["source"] = self.better_getsource(
-                    temp_import
-                )
-                # logger.debug(
-                #     f"retrieved source {self.known_imports[import_name]['source']}"
-                # )
-            self.known_imports[import_name]["location"] = mod_spec.origin
-            # logger.debug(f"mod spec origin 2 {mod_spec.origin}")
-        else:
-            logger.debug(f"{import_name} is part of the python library. skipping")
-            # logger.debug(f"stdlib!")
-            self.known_imports[import_name]["location"] = "stdlib"
+        self.known_imports[import_name]["location"] = source_file
+        self.known_imports[import_name]["ast"] = ast.parse(source_file.read_text())
 
     def import_module(self, module_name):
-        """Import the code from a specific module"""
+        """Import the code from a specific module."""
         self.register(module_name)
         if module_name in self.known_imports:
             return self.resolve_import(module_name)
@@ -197,6 +126,10 @@ class ImportManager:
                 return self.resolve_import(key)
 
     def resolve_all(self):
-        for key, val in self.known_imports.items():
-            if not val.get("location"):
+        for key in list(self.known_imports.keys()):
+            if not self.known_imports[key].get("location"):
                 self.resolve_import(key)
+
+
+# Force singleton behavior
+ImportManager = ImportManager()
