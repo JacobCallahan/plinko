@@ -32,7 +32,7 @@ def test_robottelo_api():
     )
     parser.parse_directory(test_directory)
     helpers.write_to_file(
-        parser.cov_tests,
+        helpers.expand_dict_keys(parser.cov_tests),
         f"projects/{name}/api/{product_ver}/test-coverage.yaml",
         "tests with coverage",
     )
@@ -43,7 +43,7 @@ def test_robottelo_api():
     )
     if behavior == "minimal":
         helpers.write_to_file(
-            helpers.get_min_tests(parser.cov_tests),
+            helpers.expand_dict_keys(helpers.get_min_tests(parser.cov_tests)),
             f"projects/{name}/api/{product_ver}/min-tests.yaml",
             "minimal tests",
         )
