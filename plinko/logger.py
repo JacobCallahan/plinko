@@ -1,14 +1,15 @@
-# -*- encoding: utf-8 -*-
 """Module handling internal and dependency logging."""
 import logging
-import os
-from pathlib import Path
+
 import logzero
+
+from plinko.config import PLINKO_DATA_DIR
 
 
 def setup_logzero(level="info", path="logs/plinko.log"):
-    plinko_path = Path(os.environ.get("PLINKO_DIRECTORY", "")).absolute()
-    path = str(plinko_path.joinpath(path))
+    # plinko_path = Path(os.environ.get("PLINKO_DIRECTORY", "")).absolute()
+    path = PLINKO_DATA_DIR.joinpath(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
     log_fmt = "%(color)s[%(levelname)s %(asctime)s]%(end_color)s %(message)s"
     if level == "debug":
         level = logging.DEBUG
@@ -29,7 +30,7 @@ def setup_logzero(level="info", path="logs/plinko.log"):
     logzero.setup_default_logger(formatter=formatter)
     logzero.loglevel(level)
     logzero.logfile(
-        path, loglevel=level, maxBytes=1e9, backupCount=3, formatter=formatter
+        str(path), loglevel=level, maxBytes=1e9, backupCount=3, formatter=formatter
     )
 
 
