@@ -1,4 +1,4 @@
-"""Base command for plinko."""
+"""Base command for Plinko."""
 import click
 from logzero import logger
 
