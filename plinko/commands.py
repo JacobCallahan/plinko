@@ -70,7 +70,7 @@ def cli(
             "tests with coverage",
         )
         helpers.write_to_file(
-            helpers.expand_dict_keys(parser.miss_tests),
+            parser.miss_tests,
             f"{PLINKO_DATA_DIR}/projects/{name}/{interface}/{product_ver}/test-no-coverage.yaml",
             "tests without coverage",
         )
