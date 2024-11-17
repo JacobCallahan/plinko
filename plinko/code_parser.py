@@ -66,7 +66,7 @@ class CodeParser:
         for func_path, func_obj in parser.methods.items():
             if func_obj.is_test:
                 if "module_org" in func_obj.args:
-                    import IPython; IPython.embed()
+                    pass
                 if func_obj.covers:
                     self.cov_tests[func_path] = func_obj.covers
                 else:
