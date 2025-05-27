@@ -9,7 +9,7 @@ with open("README.md") as readme_file:
 with open("HISTORY.rst") as history_file:
     history = history_file.read()
 
-requirements = ["click", "dynaconf", "logzero", "pyyaml", "xdg-base-dirs"]
+requirements = ["click", "dynaconf", "logzero", "pyyaml", "xdg-base-dirs", "python-lsp-client", "pyright"]
 print(find_packages())
 setup(
     name="plinko",
@@ -23,6 +23,9 @@ setup(
     entry_points={"console_scripts": ["plinko=plinko.commands:cli"]},
     include_package_data=True,
     install_requires=requirements,
+    extras_require={
+        "test": ["pytest", "pytest-asyncio", "pytest-mock"],
+    },
     license="GNU General Public License v3",
     zip_safe=False,
     keywords="plinko",

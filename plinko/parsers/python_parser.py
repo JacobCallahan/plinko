@@ -1,155 +1,60 @@
 """This module uses multiple techniques to gain insight about known entity usage."""
 import ast
+import asyncio
 from pathlib import Path
 
 from logzero import logger
 
 from plinko import code_parser
 from plinko.helpers import gen_variants, get_coverage
-from plinko.parsers import python_importer
+# from plinko.parsers import python_importer # Removed
+from plinko.lsp_adapter import LSPAdapter
 
 
-class NodeParser(ast.NodeVisitor):
-    """Move through a series of nodes and pull out relevant information."""
-
-    def __init__(self, **kwargs):
-        self.interests = {
-            "method_calls": [],  # [{module: method}]
-            "attributes_accessed": [],  # [attribute name]
-            "module_accessed": [],  # [module name]
-            "entity_instance": [],  # [entity name]
-            "assignment": {},  # {target: value}
-        }
-        self.known_entities = kwargs.get("known_entities", [])
-        super()
-
-    def _add_to_path(self, parent, child, type_name=None):
-        """Add a specific or empty _path list to each visited node."""
-        if not parent.__dict__.get("_path"):
-            parent._path = []
-        if not child.__dict__.get("_path"):
-            child._path = parent._path[:]
-        if type_name:
-            child._path.append(type_name)
-
-    def _handle_assignment(self, node, name):
-        """Read a node's path and determine if it is part of an assignment."""
-        if "assignment" in node._path:
-            if node._path[-1] == "target":
-                self.interests["assignment"][ast.unparse(node).strip()] = None
-            elif "value" in node._path:
-                for key, val in self.interests["assignment"].items():
-                    if val is None:
-                        self.interests["assignment"][key] = name
-
-    # this should be assigned to the Setting(s) entity instead of search
-    # [D 230822 12:53:00 python_parser:179] Investigating line: setting_object = entities.Setting().search(query={'search': f'name={request.param}'})[0]
-    # [D 230822 12:53:00 python_parser:184] Found interests {'method_calls': ['search'], 'attributes_accessed': ['entities.Setting', 'param'], 'module_accessed': ['entities', 'request'], 'entity_instance': ['Setting'], 'assignment': {'setting_object': 'search'}}
-
-
-    def generic_visit(self, node):
-        """Add a _path attribute to each node to track parents."""
-        for child in ast.iter_child_nodes(node):
-            self._add_to_path(node, child, "generic")
-        ast.NodeVisitor.generic_visit(self, node)
-
-    def visit_Assign(self, node):
-        for child in ast.iter_child_nodes(node):
-            self._add_to_path(node, child, "assignment")
-            if child in node.targets:
-                self._add_to_path(node, child, "target")
-            else:
-                self._add_to_path(node, child, "value")
-        ast.NodeVisitor.generic_visit(self, node)
-
-    def visit_Call(self, node):
-        for child in ast.iter_child_nodes(node):
-            if node.func == child:
-                self._add_to_path(node, child, "call")
-        ast.NodeVisitor.generic_visit(self, node)
-
-    def visit_Attribute(self, node):
-        """Visit an Attribute node and add relevant information to the interests dictionary.
-        If the attribute is being called, check if it is a known entity instance or a method call.
-        If it is a known entity instance, add the attribute to the attributes_accessed list.
-        If it is not a known entity instance, add it to the method_calls list.
-        If it is not being called, add it to the attributes_accessed list.
-        """
-        for child in ast.iter_child_nodes(node):
-            self._add_to_path(node, child, "attribute")
-        attr = node.attr
-        self._handle_assignment(node, attr)
-        if node._path and node._path[-1] == "call":
-            # something is being called
-            if attr in self.known_entities:
-                # an entity is being instaced
-                self.interests["entity_instance"].append(attr)
-                self.interests["attributes_accessed"].append(ast.unparse(node).strip())
-            else:
-                # not a direct entity instance, so we'll store it
-                self.interests["method_calls"].append(attr)
-        else:
-            # we're an attribute of something, so store it for inspection
-            self.interests["attributes_accessed"].append(attr)
-        ast.NodeVisitor.generic_visit(self, node)
-
-    def visit_Name(self, node):
-        for child in ast.iter_child_nodes(node):
-            self._add_to_path(node, child)
-        name = node.id
-        self._handle_assignment(node, name)
-        if node._path and node._path[-1] == "call":
-            # something is being called
-            if name in self.known_entities:
-                # an entity is being instaced
-                self.interests["entity_instance"].append(name)
-            else:
-                # not a direct entity instance, so we'll store it
-                self.interests["method_calls"].append(name)
-        elif node._path and node._path[-1] == "attribute":
-            # possible module member is being accessed
-            self.interests["module_accessed"].append(ast.unparse(node).strip())
-        ast.NodeVisitor.generic_visit(self, node)
+# NodeParser class removed
 
 
 class Function:
-    def __init__(self, ast, parent_parser, location=None, **kwargs):
-        self.ast = ast
+    def __init__(self, ast_node, parent_parser, location=None, **kwargs):
+        self.ast = ast_node # Store ast_node
         self.parent_parser = parent_parser
+        self.lsp_adapter = kwargs.get("lsp_adapter", parent_parser.lsp_adapter)
         self.location = location or self.parent_parser.code_file.name
         self.parent_class = kwargs.get("parent_class")
-        self.name = self.is_test = self.is_fixture = None
-        self.covers, self.calls, self.fixtures, self.args, self.decs = (
-            set(),
-            set(),
-            set(),
-            [],
-            [],
-        )
-        self.parse()
-        self.parent_parser.methods[self.full_name] = self
-        if self.parent_parser.methods.get(self.name):
-            del self.parent_parser.methods[self.name]
+        
+        self.name = self.ast.name
+        self.is_test = False
+        self.is_fixture = False
+        self.decs = []
+        self._find_decorators() # Initialize decorators
 
-    def _find_entity(self, line):
-        """Search through all known entities and return all matches."""
-        found = []
-        for entity in self.parent_parser.entities:
-            if entity in line:
-                found.append(entity)
-            elif self.parent_parser._search_aggressiveness != "low":
-                variants = gen_variants(entity)
-                upper_line = line.upper()
-                lower_line = line.lower()
-                for variant in variants:
-                    if found:
-                        continue
-                    if variant in line:
-                        found.append(entity)
-                    elif self.parent_parser._search_aggressiveness == "high":
-                        if variant in upper_line or variant in lower_line:
-                            found.append(entity)
-        return found
+        if self.name.startswith("test_") and self.parent_parser.code_file.name.startswith("test_"):
+            self.is_test, self.is_fixture = True, False
+        
+        for dec in self.decs: # Check fixture status from decorators
+            if "fixture" in dec:
+                self.is_fixture = True
+                self.is_test = False # A fixture is not usually a test itself
+                break
+
+        self.full_name = ":".join(
+            filter(None, (self.location, self.parent_class, self.name))
+        )
+        self.args = {arg.arg for arg in self.ast.args.args}
+        
+        self.covers, self.calls, self.fixtures = (
+            set(),
+            set(),
+            set(),
+        )
+        # self.parse() # Removed direct call to parse
+        
+        self.parent_parser.methods[self.full_name] = self
+        if self.parent_parser.methods.get(self.name) and self.parent_parser.methods.get(self.name) is not self:
+            if self.parent_parser.methods.get(self.name) is not self:
+                 del self.parent_parser.methods[self.name]
+
+    # _find_entity method removed
 
     def _find_decorators(self):
         """Find all decorators attached to this function."""
@@ -157,11 +62,108 @@ class Function:
             if isinstance(dec, ast.Name):
                 self.decs.append(dec.id)
             elif isinstance(dec, ast.Attribute):
-                self.decs.append(dec.attr)
-            else:
+                # For decorators like @pytest.mark.foo, dec.attr would be 'foo'
+                # For @something.else, it would be 'else'.
+                # We might want the full decorator string in some cases.
+                self.decs.append(ast.unparse(dec).strip()) # Store full decorator string
+            else: # For ast.Call, etc.
                 self.decs.append(ast.unparse(dec).strip())
 
-    def parse(self):
+    async def async_parse_with_lsp(self):
+        """
+        Parses the function's body using LSP to find calls and determine coverage.
+        """
+        logger.debug(f"Async parsing with LSP for function: {self.full_name} in {self.parent_parser.code_file}")
+
+        for node in ast.walk(self.ast): # Iterate through all nodes in the function's AST
+            if isinstance(node, ast.Call):
+                call_func = node.func
+                # Line numbers are 1-based in AST, LSP expects 0-based
+                call_line = call_func.lineno - 1 
+                call_char = call_func.col_offset
+
+                try:
+                    logger.debug(f"Getting definition for call {ast.unparse(call_func)} at {self.parent_parser.code_file}:{call_line+1}:{call_char}")
+                    definition_response = await self.lsp_adapter.get_definition(
+                        self.parent_parser.code_file, call_line, call_char
+                    )
+                    
+                    # definition_response can be a list or a single dict, or None
+                    definitions = []
+                    if isinstance(definition_response, list):
+                        definitions = definition_response
+                    elif isinstance(definition_response, dict) and 'uri' in definition_response and 'range' in definition_response:
+                        definitions = [definition_response]
+                    
+                    if not definitions:
+                        logger.warning(f"No definition found for {ast.unparse(call_func)} in {self.full_name}")
+                        self.calls.add(f"UNRESOLVED:{ast.unparse(call_func)}")
+                        continue
+
+                    for definition in definitions:
+                        def_uri = definition.get('uri')
+                        # def_range = definition.get('range') # For future use if needed
+                        
+                        if not def_uri:
+                            self.calls.add(f"UNRESOLVED:{ast.unparse(call_func)} (no URI)")
+                            continue
+
+                        def_path = Path(def_uri.replace('file://', ''))
+                        
+                        # Attempt to form a representative string for the call
+                        # This is a simplification; robustly getting the FQN from LSP is harder
+                        call_target_str = f"{def_path.stem}.{ast.unparse(call_func)}" # Default/fallback
+                        
+                        # Try to infer a module path relative to project or site-packages
+                        try:
+                            # Try to make it relative to project root if possible
+                            rel_path = def_path.relative_to(self.parent_parser.project_root)
+                            module_parts = list(rel_path.parent.parts)
+                            if rel_path.stem != "__init__":
+                                module_parts.append(rel_path.stem)
+                            call_target_str = ".".join(module_parts) + f".{ast.unparse(call_func)}"
+                        except ValueError: # Not under project root, try to find site-packages
+                            if 'site-packages' in def_path.parts:
+                                sp_index = def_path.parts.index('site-packages')
+                                module_parts = list(def_path.parts[sp_index+1:])
+                                if module_parts[-1] == "__init__.py": # e.g. .../module/__init__.py
+                                     module_parts = module_parts[:-1]
+                                elif module_parts[-1].endswith(".py"): # e.g. .../module/file.py
+                                    module_parts[-1] = module_parts[-1][:-3] # remove .py
+                                call_target_str = ".".join(module_parts) + f".{ast.unparse(call_func)}"
+                        
+                        self.calls.add(call_target_str)
+                        logger.debug(f"Call to {call_target_str} added from {self.full_name}")
+
+                        # Coverage Check
+                        for entity_name in self.parent_parser.entities: # e.g., entity_name is 'nailgun'
+                            # Check if the definition path contains the entity name as a directory component
+                            # This is a simple heuristic. More robust would be to check against a list of entity module names.
+                            if f"/{entity_name}/" in def_uri or def_uri.endswith(f"/{entity_name}.py"):
+                                # Determine the specific method/function name from the call or definition
+                                # For now, using ast.unparse(call_func) which might be MyClass.method or just method
+                                called_member_name = ast.unparse(call_func)
+                                if '.' in called_member_name: # Likely Class.method or module.method
+                                    called_member_name = called_member_name.split('.')[-1]
+
+                                self.covers.add(f"{entity_name} {called_member_name}")
+                                logger.debug(f"Coverage added: {entity_name} {called_member_name} by {self.full_name}")
+                                if self.parent_parser.create_on_instance:
+                                     # Simplistic check: if the call looks like an instantiation (e.g. MyClass())
+                                     # This is hard to determine accurately without type info for `call_func` itself
+                                     # A better check might be if the definition points to an __init__ method of a class
+                                     # or if `ast.unparse(call_func)` matches an entity name (e.g. `nailgun.Client()`)
+                                    if called_member_name.lower() == entity_name.lower() or called_member_name == "Client": # Heuristic
+                                        self.covers.add(f"{entity_name} create")
+                                        logger.debug(f"Coverage added: {entity_name} create by {self.full_name}")
+
+
+                except Exception as e:
+                    logger.error(f"Error getting definition for {ast.unparse(call_func)} in {self.full_name}: {e}")
+                    self.calls.add(f"ERROR_RESOLVING:{ast.unparse(call_func)}")
+        logger.debug(f"Finished LSP parsing for {self.full_name}. Calls: {self.calls}, Covers: {self.covers}")
+
+    def _legacy_parse_with_nodeparser(self): # Renamed from parse
         """Recurse through a this function's AST to find anything useful."""
         # pull decorator information and check for us being a fixture
         self._find_decorators()
@@ -178,141 +180,10 @@ class Function:
         )
         self.args = {arg.arg for arg in self.ast.args.args}
         known_vars = {}
-        logger.debug(f"Parsing method ast {self}")
-        for line_node in self.ast.body:
-            unparsed_line = ast.unparse(line_node)
-            logger.debug(f"Investigating line: {unparsed_line}")
-            known_entities = self._find_entity(unparsed_line)
-            # parse the line and find the interests
-            line_parser = NodeParser(known_entities=known_entities)
-            line_parser.visit(line_node)
-            logger.debug(f"Found interests {line_parser.interests}")
-            # check to see if an entity was instanced and/or assigned to a variable
-            for entity in line_parser.interests["entity_instance"]:
-                if self.parent_parser.create_on_instance:
-                    self.covers.add(f"{entity} create")
-                for key, val in line_parser.interests["assignment"].items():
-                    if val in ("create", "update", "info", "read"):
-                        known_vars[key] = entity
-            # catch the rest just in case we miss an entity instance
-            for entity in [*known_entities, *known_vars]:
-                if (
-                    entity in line_parser.interests["method_calls"]
-                    and self.parent_parser.create_on_instance
-                ):
-                    self.covers.add(f"{entity} create")
-            # check for method calls
-            for meth_call in line_parser.interests["method_calls"]:
-                if (
-                    not line_parser.interests["module_accessed"]
-                    and not line_parser.interests["attributes_accessed"]
-                    and meth_call not in python_importer.BUILTINS
-                ):
-                    # a non-external method is being called
-                    self.calls.add(meth_call)
-                else:
-                    found = False
-                    # test for the method being a member of a module. module.method()
-                    for module in line_parser.interests["module_accessed"]:
-                        # We need to resolve uses of self and cls
-                        if module in ["self", "cls"] and self.parent_class:
-                            #  logger.warning(f"class name: {class_name}, meth call: {meth_call}")
-                            if (
-                                self.parent_class
-                                and meth_call
-                                in self.parent_parser.classes[self.parent_class][
-                                    "methods"
-                                ]
-                            ):
-                                module = self.parent_class
-                            elif (
-                                self.parent_class
-                                and self.parent_parser.classes[self.parent_class][
-                                    "bases"
-                                ]
-                            ):
-                                for base in self.parent_parser.classes[
-                                    self.parent_class
-                                ]["bases"]:
-                                    self.parent_parser._to_investigate.add(
-                                        f"{base}.{meth_call}"
-                                    )
-                            else:
-                                logger.debug(f"Can't resolve {module} for {meth_call}")
-                        if f"{module}.{meth_call}" in unparsed_line:
-                            # the method belongs to this module
-                            if module in known_entities:
-                                self.covers.add(f"{module} {meth_call}")
-                            elif module in known_vars:
-                                self.covers.add(f"{known_vars[module]} {meth_call}")
-                            else:
-                                self.calls.add(f"{module} {meth_call}")
-                            found = True
-                            break
-                        # if it isn't a direct member, see if it is related
-                        # entity.something.method()
-                        for attr in line_parser.interests["attributes_accessed"]:
-                            # We need to resolve uses of self and cls
-                            if attr in ["self", "cls"]:
-                                if (
-                                    self.parent_class
-                                    and meth_call
-                                    in self.parent_parser.classes[self.parent_class][
-                                        "methods"
-                                    ]
-                                ):
-                                    attr = self.parent_class
-                                elif (
-                                    self.parent_class
-                                    and self.parent_parser.classes[self.parent_class][
-                                        "bases"
-                                    ]
-                                ):
-                                    for base in self.parent_parser.classes[
-                                        self.parent_class
-                                    ]["bases"]:
-                                        self.parent_parser._to_investigate.add(
-                                            f"{base}.{attr}.{meth_call}"
-                                        )
-                                else:
-                                    logger.debug(
-                                        f"Can't resolve {attr} for {module}'s {meth_call}"
-                                    )
-                            # now we need to determine if the attribute is a member of the module
-                            if "." in attr:
-                                if (split_attr := attr.split("."))[1] in known_entities:
-                                    self.covers.add(f"{split_attr[1]} {meth_call}")
-                                else:
-                                    self.calls.add(f"{split_attr[1]} {meth_call}")
-                                found = True
-                                break
-
-                            if f"{module}.{attr}.{meth_call}" in unparsed_line:
-                                # the method belongs to this module
-                                if module in known_entities:
-                                    self.covers.add(f"{module} {attr} {meth_call}")
-                                elif (
-                                    attr in known_entities
-                                    or f"{module}.{attr}" in known_vars
-                                ):
-                                    self.covers.add(f"{attr} {meth_call}")
-                                elif module in known_vars:
-                                    self.covers.add(
-                                        f"{known_vars[module]} {attr} {meth_call}"
-                                    )
-                                elif attr in known_vars:
-                                    self.covers.add(f"{known_vars[attr]} {meth_call}")
-                                else:
-                                    self.calls.add(f"{module} {attr} {meth_call}")
-                                found = True
-                                break
-
-                    if not found:
-                        self.calls.add(f"{meth_call}".strip())
-                        self.parent_parser._to_investigate.add(meth_call)
-            logger.debug(
-                f"known vars: {known_vars}, known entities: {known_entities} \nMethod Report:\n\t{self.covers}"
-            )
+        logger.debug(f"Legacy parsing method ast {self}")
+        # This part now needs to be removed or fully replaced by LSP logic
+        # For now, keeping the logger line, but NodeParser dependent logic is gone.
+        # Original NodeParser logic was here.
 
 
 class CodeParser:
@@ -320,21 +191,19 @@ class CodeParser:
         self.code_file = Path(code_file)
         self.parent_parser = parent_parser
         self.create_on_instance = parent_parser.create_on_instance
-        self.max_depth = parent_parser.max_depth
         self.entities = parent_parser.entities
-        self._curr_depth = kwargs.get("curr_depth", 0)
-        self._search_aggressiveness = kwargs.get("search_aggressiveness", "low")
-        self._to_investigate = set()  # {"module", "module attr call"}
-        self.import_manager = python_importer.ImportManager
-        self.imports = {}  # {import_name: (module, <real_name>)}
-        # {class_name: {bases: [bases], methods: [{method_name: method_ast}]}}
-        # {method_name: Function}
-        # {test_name: Function}
+        # self._curr_depth = kwargs.get("curr_depth", 0) # Less relevant
+        self._search_aggressiveness = kwargs.get("search_aggressiveness", "low") # May still be used by Function.parse
+        # self._to_investigate = set() # Removed
+        # self.import_manager = python_importer.ImportManager # Removed
+        # self.imports = {} # Removed
+        self.lsp_adapter = LSPAdapter(project_root=self.parent_parser.project_root)
         self.classes, self.methods, self.covers = {}, {}, {}
-        code_parser.PARSED_FILES.append(code_file)
+        if code_file not in code_parser.PARSED_FILES: # Ensure it's added only once
+            code_parser.PARSED_FILES.append(code_file)
 
     @staticmethod
-    def _find_all(needle, haystack):
+    def _find_all(needle, haystack): # Keep if used, seems generic
         if isinstance(needle, dict):
             return {
                 item: CodeParser._find_all(item, haystack) for item in needle
@@ -344,219 +213,134 @@ class CodeParser:
         else:
             pos = haystack.find(needle)
             if pos == -1:
-                return [pos]
+                return [pos] # Should perhaps be [] or None for consistency
             found = []
             while pos > -1:
                 found.append(pos)
-                pos = haystack[pos + 1 :].find(needle)
+                # Corrected find from original: search in the rest of the string
+                next_pos = haystack[pos + len(needle) :].find(needle)
+                if next_pos == -1:
+                    break
+                pos += len(needle) + next_pos
             return found
 
-    def _parse_general(self, gen_ast):  # this is currently unused
-        """Largely for misc imports seen later which are more complex."""
-        if isinstance(gen_ast, ast.ClassDef):
-            self._parse_class_ast(gen_ast)
-        elif isinstance(gen_ast, ast.AsyncFunctionDef | ast.FunctionDef):
-            Function(gen_ast, self)  # where does this need to go?
-        elif "body" in dir(gen_ast):
-            for node in gen_ast.body:
-                self._parse_general(node)
-        else:
-            logger.debug(
-                f"Unable to handle node: {gen_ast}\nCode: {ast.unparse(gen_ast)}"
-            )
+    # def _parse_general(self, gen_ast): # Removed, functionality integrated or made obsolete by LSP
+    #     pass
 
     def _parse_class_ast(self, class_ast, parents=""):
-        """Move through a class and record all the methods."""
-        self.classes[class_ast.name] = {"bases": [], "methods": []}
+        """Move through a class and record all the methods and basic structure."""
+        class_name = class_ast.name
+        full_class_name = f"{parents}.{class_name}" if parents else class_name
+        self.classes[class_name] = {"bases": [], "methods": []} # Store by simple name for now
         # add the class' bases
         for class_base in class_ast.bases:
-            self.classes[class_ast.name]["bases"].append(
+            self.classes[class_name]["bases"].append(
                 ast.unparse(class_base).strip()
             )
         # add the class' children
         for node in class_ast.body:
             if isinstance(node, ast.ClassDef):
-                self._parse_class_ast(node, parents=f"{parents}.{class_ast.name}")
-            elif isinstance(node, ast.AsyncFunctionDef | ast.FunctionDef):
-                class_func = Function(node, self, parent_class=class_ast.name)
-                self.classes[class_ast.name]["methods"].append(class_func)
-                #   self.methods[node.name] = node
-                # else:
-                #     self.methods[f"{parents}~{class_ast.name}~{node.name}"] = node
+                self._parse_class_ast(node, parents=full_class_name)
+            elif isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef)):
+                # Pass lsp_adapter to Function constructor
+                Function(node, self, parent_class=class_name, lsp_adapter=self.lsp_adapter)
+                # self.classes[class_name]["methods"].append(class_func) # Function adds itself to parent_parser.methods
 
     def _parse_file(self):
-        """Parse a file, bringing in all the high level items."""
-        logger.info(f"Starting to parse {self.code_file.absolute()}")
-        file_ast = None
+        """Parse a file, identifying top-level classes and functions for further LSP analysis."""
+        logger.info(f"Shallow parsing file for AST structure: {self.code_file.absolute()}")
+        file_content = ""
         if not self.code_file.exists():
             logger.warning(f"{self.code_file} does not exist!")
             return
-        with self.code_file.open() as py_file:
-            try:
-                file_ast = ast.parse(py_file.read())
-            except UnicodeDecodeError:
-                logger.warning(f"Unable to parse {self.code_file.absolute()}")
-                return
+        try:
+            file_content = self.code_file.read_text()
+            file_ast = ast.parse(file_content)
+        except UnicodeDecodeError:
+            logger.warning(f"Unable to parse {self.code_file.absolute()} due to UnicodeDecodeError.")
+            return
+        except SyntaxError:
+            logger.warning(f"Unable to parse {self.code_file.absolute()} due to SyntaxError.")
+            return
+
         # move through all high level nodes
         for node in file_ast.body:
-            if isinstance(node, ast.ImportFrom):
-                for name in node.names:
-                    if name.asname:  # if using import something as another_name
-                        self.import_manager.register(
-                            name.asname, node.__dict__.get("module"), name.name
-                        )
-                    else:
-                        self.import_manager.register(
-                            name.name, node.__dict__.get("module")
-                        )
-            elif isinstance(node, ast.Import):
-                # regular imports are pretty similar, but still different enough
-                for name in node.names:
-                    if name.asname:
-                        # this will make sense later...
-                        self.import_manager.register(name.asname, name.name)
-                    else:
-                        self.import_manager.register(name.name)
-            elif isinstance(node, ast.ClassDef):
+            if isinstance(node, ast.ClassDef):
                 self._parse_class_ast(node)
-            elif isinstance(node, ast.AsyncFunctionDef | ast.FunctionDef):
-                # if "test_" in node.name:
-                #     self.tests[node.name] = None
-                self.methods[node.name] = node
+            elif isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef)):
+                # Pass lsp_adapter to Function constructor
+                Function(node, self, lsp_adapter=self.lsp_adapter)
+            # Import handling (ast.Import, ast.ImportFrom) is removed, LSP will manage this.
 
-    def _parse_import(self, import_name):
-        """Parse through the import's file and get any coverage out of it."""
-        if self._curr_depth >= self.max_depth:
-            logger.debug(f"Max depth of {self.max_depth} has been reached!")
-            return
-        # if not, try to fall back to the file itself
-        file_path = self.import_manager.get_file(import_name)
-        if not file_path or file_path in code_parser.PARSED_FILES:
-            # logger.error(f'No file for {import_name}: tried: {file_path}')
-            return
-        # logger.error(f'Found file for {import_name}: {file_path}')
-        # pass the file on to a new parser
-        py_parser = CodeParser(
-            code_file=file_path,
-            parent_parser=self.parent_parser,
-            curr_depth=self._curr_depth + 1,
-        )
-        py_parser.parse()
-        # then get the results
-        if import_name in py_parser.methods:
-            self.import_manager.add_methods(
-                import_name, py_parser.methods[import_name]
-            )
-            self.methods[import_name] = py_parser.methods[import_name]
-        else:
-            logger.error(f"{import_name} not in {py_parser.methods}")
-            for meth, contents in py_parser.methods.items():
-                if import_name in meth:
-                    self.import_manager.add_methods(import_name, contents)
-                    self.methods[import_name] = contents
-                    return
-            self.import_manager.add_methods(import_name, py_parser.methods)
+    # def _parse_import(self, import_name): # Removed
+    #     pass
 
     def _match_fixtures(self):
         """Match a method's args to available fixtures."""
-        fixtures = {meth.name: meth for meth in self.methods.values() if meth.is_fixture}
+        # This method's effectiveness might change depending on when Function.covers is populated by LSP.
+        # For now, keeping its logic.
+        fixtures = {meth.name: meth for meth in self.methods.values() if isinstance(meth, Function) and meth.is_fixture}
         for method in self.methods.values():
+            if not isinstance(method, Function): # Ensure we are working with Function objects
+                continue
             for arg in method.args:
                 if fixture := fixtures.get(arg):
                     method.fixtures.add(fixture)
                     method.covers.update(fixture.covers)
-                elif fixture := self.parent_parser.fixture_handler.fixtures.get(arg):
-                    method.fixtures.add(fixture)
+                elif fixture := self.parent_parser.fixture_handler.fixtures.get(arg): # Access main fixture handler
+                    method.fixtures.add(fixture) # fixture here is likely a Fixture object from pytest_tools
                     method.covers.update(fixture.covers)
 
-    def _perform_investigations(self):
-        """Check through the investigation list and try to draw conclusions."""
-        logger.debug("Resolving all imports")
-        self.import_manager.resolve_all()
-        # gather all unresolved method calls
-        for meth, values in self.methods.items():
-            # first, determine if the current method needs to be added
-            if values == "stdlib" or meth in self._to_investigate:
-                # we can skip both of these right off
-                continue
-            elif not isinstance(values, Function):
-                # we definitely need to investigate this
-                logger.debug(f"Adding {meth} to investigation list")
-                self._to_investigate.add(meth)
-            # next, we need to determine if the method's calls need to be added
-            elif isinstance(values, Function) and values.calls:
-                for call in values.calls:
-                    if isinstance(call, Function):
-                        continue
-                    meth_call = call.split()[-1]
-                    if (
-                        meth_call not in self.methods.items()
-                        and meth_call not in self._to_investigate
-                    ):
-                        logger.debug(f"Adding {call} to investigation list")
-                        self._to_investigate.add(call)
-        # now to carry on all of our investigations!
-        for subjects in self._to_investigate.copy():  # copy to avoid size change
-            subject = subjects.split()[-1]
-            logger.debug(f"Investigating {subjects}")
-            if (
-                subject in self.methods
-                and self.methods.get(subject) != "stdlib"
-            ):
-                # it is something we've already recorded
-                if "ast." in str(type(self.methods[subject])):
-                    # this is a non-parsed method, so let's parse it
-                    logger.debug(f"Parsing non-parsed method {subject}")
-                    Function(self.methods[subject], self)
-                elif not isinstance(self.methods[subject], Function):
-                    # we don't know anything about this. time to check imports
-                    logger.debug(f"Checking imports for {subject}")
-                    methods = self.import_manager.get_methods(subject)
-                    if not methods or subject not in methods:
-                        self._parse_import(subject)
-            else:
-                # we've not recorded it, so we'll investigate
-                logger.debug(f"Checking imports for {subject}")
-                methods = self.import_manager.get_methods(subject)
-                if not methods or subject not in methods:
-                    self._parse_import(subject)
-            self._to_investigate.remove(subjects)
+
+    # def _perform_investigations(self): # Removed
+    #     pass
+
+    async def _async_parse_setup(self):
+        """Helper async function to manage LSP server and document opening."""
+        await self.lsp_adapter.start_server()
+        await self.lsp_adapter.initialize()
+        await self.lsp_adapter.open_document(self.code_file)
+        
+        # After setup, parse functions using LSP
+        if self.methods: # self.methods is populated by _parse_file
+            logger.debug(f"Found {len(self.methods)} methods to LSP parse in {self.code_file}")
+            for func_obj in self.methods.values():
+                if isinstance(func_obj, Function): # Ensure it's a Function object
+                    try:
+                        await func_obj.async_parse_with_lsp()
+                    except Exception as e:
+                        logger.error(f"Error during LSP parsing of function {func_obj.full_name}: {e}")
+        else:
+            logger.debug(f"No methods found by _parse_file to LSP parse in {self.code_file}")
+
 
     def parse(self):
-        """Main method that runs everything."""
-        self._parse_file()
-        self._perform_investigations()
-        max_loops, loop_num = 10, 0
-        while self._to_investigate and loop_num < max_loops:
-            self._perform_investigations()
-            loop_num += 1
-        # finally we resolve all the coverage we can
-        for method in self.methods:
-            # add any coverage from known matching imports
-            if not isinstance(self.methods[method], Function):
-                self._to_investigate.add({method: self.methods[method]})
-                continue
-            if not isinstance(self.methods[method].calls, Function):
-                logger.warning(
-                    f"{self.methods[method].full_name} has unresolved calls:\n{self.methods[method].calls}"
-                )
-            else:
-                for call in self.methods[method].calls:
-                    # call_cov = self.import_manager.get_methods(call)
-                    # if isinstance(call_cov, dict) and call_cov.get("covers"):
-                    #     self.methods[method]["covers"].append(call_cov)
-                    self.methods[method].covers.update(call.covers)
+        """Main method that runs everything. Initiates LSP and performs AST parsing."""
+        logger.info(f"Starting LSP-assisted parsing for {self.code_file}")
+        
+        # Perform shallow AST parsing FIRST to identify functions/classes and populate self.methods
+        self._parse_file() 
+
+        # Now, manage asyncio event loop for LSP communication and deep parsing
+        try:
             try:
-                self.methods[method].covers.update(get_coverage(method, self.methods))
-            except RecursionError:
-                logger.warning(
-                    f"Max recursion depth reached when compiling coverage for {method}."
-                )
-        # attempt to resolve fixture coverage
+                loop = asyncio.get_running_loop()
+            except RuntimeError: # No event loop running
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+            
+            # _async_parse_setup will now also trigger LSP parsing for each function
+            loop.run_until_complete(self._async_parse_setup())
+        except Exception as e:
+            logger.error(f"LSP setup or async parsing failed for {self.code_file}: {e}")
+            # Decide if we should proceed with potentially incomplete data or halt.
+            # For now, fixture matching will run with whatever data was gathered.
+
+        # Fixture matching might be deferred or re-evaluated after LSP analysis.
+        # For now, it's called here. Its full functionality depends on when `covers` are populated.
         self._match_fixtures()
-        # if logger.level == 10:
-        #     write_to_file(
-        #         self.import_manager.known_imports,
-        #         f"projects/hammer/cli/test/imports.yaml",
-        #         "tests without coverage",
-        #     )
+
+        # Coverage compilation loop is removed for now. This will be driven by LSP results.
+        logger.info(f"Completed initial parsing pass for {self.code_file}. LSP is active.")
+        # The rest of the original parse method (coverage compilation, import resolution)
+        # will be replaced by LSP-driven analysis in the next steps.
