@@ -36,7 +36,6 @@ class CodeParser:
         self.create_on_instance = kwargs.get(
             "create_on_instance", settings.create_on_instance
         )
-        self.max_depth = kwargs.get("max_depth", settings.max_depth)
         self.PyParser = python_parser.CodeParser
         self.fixture_handler = FixtureHandler
         self.fixture_handler._main_parser = self
