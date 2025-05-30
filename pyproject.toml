@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "plinko"
+version = "0.2.0"
+description = "Determine what tests are most likely applicable, based on a diff between product versions."
+readme = "README.md"
+authors = [
+    {name = "Jacob J Callahan", email = "jacob.callahan05@gmail.com"},
+]
+license = {text = "GNU General Public License v3"}
+keywords = ["plinko"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+    "Natural Language :: English",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+]
+dependencies = [
+    "click",
+    "dynaconf",
+    "logzero",
+    "pyyaml",
+    "xdg-base-dirs",
+]
+
+[project.urls]
+Homepage = "https://github.com/JacobCallahan/plinko"
+
+[project.scripts]
+plinko = "plinko.commands:cli"
+
+[tool.setuptools]
+packages = ["plinko", "plinko.parsers"]
