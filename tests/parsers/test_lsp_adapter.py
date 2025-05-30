@@ -1,321 +1,214 @@
 import asyncio
-import json
-import subprocess
 from pathlib import Path
-import io
 import pytest
 
-# Assuming lsp_adapter.py is in plinko directory and plinko is in PYTHONPATH
 from plinko.lsp_adapter import LSPAdapter
-
-# Helper to create LSP responses
-def create_lsp_response(id, result=None, error=None):
-    response = {"jsonrpc": "2.0", "id": id}
-    if result is not None:
-        response["result"] = result
-    if error is not None:
-        response["error"] = error
-    response_json = json.dumps(response).encode('utf-8')
-    header = f"Content-Length: {len(response_json)}\r\nContent-Type: application/vscode-jsonrpc; charset=utf-8\r\n\r\n".encode('utf-8')
-    return header + response_json
-
-def create_lsp_notification(method, params):
-    notification = {"jsonrpc": "2.0", "method": method, "params": params}
-    notification_json = json.dumps(notification).encode('utf-8')
-    header = f"Content-Length: {len(notification_json)}\r\nContent-Type: application/vscode-jsonrpc; charset=utf-8\r\n\r\n".encode('utf-8')
-    return header + notification_json
+# Assuming multilspy types might be needed for mock responses, or specific structures.
+from multilspy import LanguageServer as MultilspyLanguageServer 
+from multilspy.multilspy_config import MultilspyConfig
+from multilspy.multilspy_logger import MultilspyLogger
+# from multilspy import multilspy_types # If specific response types are needed for mocks
 
 @pytest.fixture
 def project_root():
     return Path("/fake/project")
 
 @pytest.fixture
-def stdin_buffer():
-    return io.BytesIO()
+def mock_multilspy_logger(mocker):
+    # Create a basic mock for MultilspyLogger if its methods are called by LSPAdapter
+    # For now, LSPAdapter just instantiates it.
+    return mocker.Mock(spec=MultilspyLogger)
 
 @pytest.fixture
-def stdout_buffer():
-    return io.BytesIO()
+def mock_multilspy_config(mocker):
+    # Create a basic mock for MultilspyConfig
+    return mocker.Mock(spec=MultilspyConfig)
 
 @pytest.fixture
-def mock_proc(mocker, stdin_buffer, stdout_buffer):
-    proc = mocker.Mock(spec=subprocess.Popen)
+def mock_language_server_instance(mocker):
+    """Mocks an instance of multilspy.LanguageServer."""
+    client_mock = mocker.AsyncMock(spec=MultilspyLanguageServer)
     
-    # Configure stdin
-    async def stdin_write(data):
-        stdin_buffer.write(data)
-        return len(data)
-    async def stdin_drain():
-        pass
-    proc.stdin = mocker.AsyncMock(spec=asyncio.StreamWriter)
-    proc.stdin.write = stdin_write
-    proc.stdin.drain = stdin_drain
-
-    # Configure stdout
-    async def stdout_readline():
-        stdout_buffer.seek(0)
-        line = stdout_buffer.readline()
-        remaining_content = stdout_buffer.read()
-        stdout_buffer.seek(0)
-        stdout_buffer.write(remaining_content)
-        stdout_buffer.truncate()
-        stdout_buffer.seek(0)
-        return line
-    async def stdout_read(n):
-        stdout_buffer.seek(0)
-        content = stdout_buffer.read(n)
-        remaining_content = stdout_buffer.read()
-        stdout_buffer.seek(0)
-        stdout_buffer.write(remaining_content)
-        stdout_buffer.truncate()
-        stdout_buffer.seek(0)
-        return content
-    proc.stdout = mocker.AsyncMock(spec=asyncio.StreamReader)
-    proc.stdout.readline = stdout_readline
-    proc.stdout.read = stdout_read
+    # Mock the async context manager for client.start_server()
+    mock_server_context = mocker.AsyncMock()
+    # __aenter__ should return the context itself or a relevant object if LSPAdapter uses it
+    mock_server_context.__aenter__.return_value = None # Or mock specific object if needed
+    client_mock.start_server.return_value = mock_server_context
     
-    proc.stderr = mocker.AsyncMock(spec=asyncio.StreamReader) # Keep stderr simple for now
-    proc.stderr.read.return_value = b"" # Default empty stderr
-    proc.poll = mocker.Mock(return_value=None) # Simulate running
-    proc.pid = 12345
-    return proc
+    # Mock the async context manager for client.open_file()
+    mock_file_context = mocker.AsyncMock()
+    mock_file_context.__aenter__.return_value = None # Or mock specific object
+    client_mock.open_file.return_value = mock_file_context
+    
+    client_mock.request_definition = mocker.AsyncMock()
+    client_mock.request_references = mocker.AsyncMock()
+    
+    return client_mock
 
 @pytest.fixture
-def mock_popen_constructor(mocker, mock_proc):
-    return mocker.patch('subprocess.Popen', return_value=mock_proc)
+def patch_multilspy_creators(mocker, mock_language_server_instance, mock_multilspy_logger, mock_multilspy_config):
+    """
+    Patches MultilspyLogger, MultilspyConfig.from_dict, and LanguageServer.create 
+    to return controlled mocks.
+    """
+    mocker.patch('plinko.lsp_adapter.MultilspyLogger', return_value=mock_multilspy_logger)
+    mocker.patch('plinko.lsp_adapter.MultilspyConfig.from_dict', return_value=mock_multilspy_config)
+    mocker.patch('plinko.lsp_adapter.LanguageServer.create', return_value=mock_language_server_instance)
 
 @pytest.fixture
-async def adapter(project_root, mock_popen_constructor, stdout_buffer): # Include stdout_buffer for teardown
-    # mock_popen_constructor ensures Popen is patched before adapter is created
+async def adapter_fixture(project_root, patch_multilspy_creators, mock_language_server_instance):
+    """
+    Provides an LSPAdapter instance with multilspy dependencies mocked.
+    Includes teardown for shutdown_server.
+    """
+    # patch_multilspy_creators ensures that when LSPAdapter is created,
+    # it uses the mocked LanguageServer.create etc.
     adapter_instance = LSPAdapter(project_root=project_root)
+    adapter_instance.client = mock_language_server_instance # Ensure the instance uses our mock client
+    
     yield adapter_instance
     
-    # Teardown
-    if adapter_instance and adapter_instance.client:
-        try:
-            # Simulate server responding to shutdown if necessary
-            # This helps adapter.shutdown() complete without hanging if it expects a response
-            # Use a plausible ID; _message_id_counter might be tricky to get here if not set yet
-            # or if the test failed before any messages were sent.
-            # A more robust way might be to have the mock_proc handle this.
-            # For simplicity, assume if client exists, a message might have been sent.
-            if adapter_instance._message_id_counter > 0 :
-                 stdout_buffer.write(create_lsp_response(adapter_instance._message_id_counter +1, {}))
-            else: # if no messages sent, maybe ID 1 if shutdown is the first request
-                 stdout_buffer.write(create_lsp_response(1, {}))
-
-            await adapter_instance.shutdown()
-        except Exception:
-            pass 
-    if adapter_instance and adapter_instance.process:
-         await adapter_instance.close()
-
-
-def get_written_json_requests(stdin_buffer_fixture):
-    stdin_buffer_fixture.seek(0)
-    content = stdin_buffer_fixture.read().decode('utf-8')
-    requests = []
-    # Split by the double CRLF that separates header and body, and then filter out empty parts
-    raw_messages = filter(None, content.split("Content-Length:"))
-    for raw_msg in raw_messages:
-        # Each raw_msg will start with "<length>\r\nContent-Type: ...\r\n\r\n<json_body>"
-        # We need to find the JSON part.
-        try:
-            # Find the start of the JSON body
-            json_start_index = raw_msg.index("\r\n\r\n") + 4
-            json_part = raw_msg[json_start_index:]
-            if json_part:
-                requests.append(json.loads(json_part))
-        except (ValueError, json.JSONDecodeError):
-            # If "\r\n\r\n" is not found or JSON is malformed, skip this part.
-            # This can happen if the buffer contains incomplete messages or just headers.
-            pass
-    return requests
+    # Teardown: Attempt to shutdown server if it was marked active
+    if adapter_instance._is_server_active:
+        await adapter_instance.shutdown_server()
 
 @pytest.mark.asyncio
-async def test_start_server_and_initialize(adapter, mock_popen_constructor, project_root, stdout_buffer, stdin_buffer):
-    await adapter.start_server()
-    mock_popen_constructor.assert_called_once_with(
-        adapter.language_server_command.split(),
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    assert adapter.process is not None
-    assert adapter.client is not None
+async def test_init_creates_multilspy_client(adapter_fixture, project_root, mock_language_server_instance):
+    # The patch_multilspy_creators fixture (used by adapter_fixture) handles this.
+    # We can assert that LanguageServer.create was called (it's implicitly tested by adapter_fixture setup)
+    # And that adapter_fixture.client is our mock_language_server_instance
+    from plinko.lsp_adapter import LanguageServer # Get the one that was patched
+    LanguageServer.create.assert_called_once()
+    assert adapter_fixture.client == mock_language_server_instance
+    assert adapter_fixture.project_root == project_root
+    # Check if config was called with "python"
+    from plinko.lsp_adapter import MultilspyConfig
+    MultilspyConfig.from_dict.assert_called_with({"code_language": "python", "trace_lsp_communication": False})
 
-    init_response_payload = {"capabilities": {"hoverProvider": True}}
-    stdout_buffer.write(create_lsp_response(1, init_response_payload)) 
-    
-    response = await adapter.initialize()
-    assert response == init_response_payload
-
-    requests = get_written_json_requests(stdin_buffer)
-    assert len(requests) == 2
-    assert requests[0]['method'] == "initialize"
-    assert requests[0]['params']['rootUri'] == project_root.as_uri()
-    assert requests[1]['method'] == "initialized"
-    assert requests[1]['params'] == {}
 
 @pytest.mark.asyncio
-async def test_open_document(adapter, project_root, stdout_buffer, stdin_buffer, mocker):
-    mocker.patch('pathlib.Path.read_text', return_value="def hello(): pass")
+async def test_start_server_and_initialize(adapter_fixture, mock_language_server_instance):
+    response = await adapter_fixture.start_server_and_initialize()
     
-    await adapter.start_server()
-    stdout_buffer.write(create_lsp_response(1, {"capabilities": {}})) # Init response
-    await adapter.initialize()
+    # Check that multilspy client's start_server context manager was entered
+    mock_language_server_instance.start_server.assert_called_once()
+    mock_language_server_instance.start_server.return_value.__aenter__.assert_called_once()
+    
+    assert adapter_fixture._is_server_active is True
+    assert response == {"status": "initialized"}
 
-    test_file = project_root / "test_file.py"
-    await adapter.open_document(test_file)
-    
-    Path.read_text.assert_called_once() # Check if the mock for read_text was called
-    requests = get_written_json_requests(stdin_buffer)
-    # requests[0] is initialize, requests[1] is initialized notification
-    did_open_notification = requests[2] 
-    assert did_open_notification['method'] == "textDocument/didOpen"
-    assert did_open_notification['params']['textDocument']['uri'] == test_file.as_uri()
-    assert did_open_notification['params']['textDocument']['text'] == "def hello(): pass"
+    # Test starting again (should be idempotent based on LSPAdapter logic)
+    await adapter_fixture.start_server_and_initialize()
+    mock_language_server_instance.start_server.assert_called_once() # Should not be called again
 
 @pytest.mark.asyncio
-async def test_get_definition(adapter, project_root, stdout_buffer, stdin_buffer):
-    await adapter.start_server()
-    stdout_buffer.write(create_lsp_response(1, {"capabilities": {}})) # initialize
-    await adapter.initialize()
+async def test_open_document(adapter_fixture, project_root, mock_language_server_instance, mocker):
+    await adapter_fixture.start_server_and_initialize() # Server must be active
 
-    test_file = project_root / "test_file.py"
+    test_file = project_root / "module" / "file.py"
+    expected_relative_path = "module/file.py" # Path.relative_to gives POSIX paths
+
+    # For Windows compatibility in test assertion if Path objects are used directly
+    # expected_relative_path_obj = Path("module") / "file.py"
+
+
+    await adapter_fixture.open_document(test_file)
+    
+    # Check that multilspy client's open_file context manager was called with correct relative path
+    # The actual call in LSPAdapter is `async with self.client.open_file(str(relative_file_path))`.
+    # So, we check if `open_file` was called, and then if its `__aenter__` was called.
+    mock_language_server_instance.open_file.assert_called_once_with(str(expected_relative_path))
+    mock_language_server_instance.open_file.return_value.__aenter__.assert_called_once()
+    mock_language_server_instance.open_file.return_value.__aexit__.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_get_definition(adapter_fixture, project_root, mock_language_server_instance):
+    await adapter_fixture.start_server_and_initialize()
+
+    test_file = project_root / "src/code.py"
+    expected_relative_path = "src/code.py"
     line, char = 5, 10
-
-    def_response_payload = {"uri": test_file.as_uri(), "range": {"start": {"line": 1, "character": 1}}}
-    # ID for initialize is 1, initialized is notification, next request ID is 2 (from adapter._message_id_counter)
-    stdout_buffer.write(create_lsp_response(adapter._message_id_counter + 1, def_response_payload))
     
-    response = await adapter.get_definition(test_file, line, char)
-    assert response == def_response_payload
+    mock_response = [{"uri": "file:///fake/project/src/definition.py", "range": {"start": {"line": 1, "character": 1}}}]
+    mock_language_server_instance.request_definition.return_value = mock_response
     
-    requests = get_written_json_requests(stdin_buffer)
-    definition_request = requests[-1] 
-    assert definition_request['method'] == "textDocument/definition"
-    assert definition_request['params']['textDocument']['uri'] == test_file.as_uri()
-    assert definition_request['params']['position'] == {"line": line, "character": char}
+    response = await adapter_fixture.get_definition(test_file, line, char)
+    
+    mock_language_server_instance.request_definition.assert_called_once_with(str(expected_relative_path), line, char)
+    assert response == mock_response
 
-    # Test empty response
-    stdout_buffer.write(create_lsp_response(adapter._message_id_counter + 1, [])) 
-    response_empty = await adapter.get_definition(test_file, line, char)
-    assert response_empty == []
-
-    # Test error response
-    error_payload = {"code": -32000, "message": "Definition error"}
-    stdout_buffer.write(create_lsp_response(adapter._message_id_counter + 1, error=error_payload))
-    with pytest.raises(RuntimeError, match="LSP Error:.*Definition error"):
-        await adapter.get_definition(test_file, line, char)
+    # Test error handling
+    mock_language_server_instance.request_definition.side_effect = Exception("Multilspy definition error")
+    with pytest.raises(RuntimeError, match="LSP Error from multilspy: Multilspy definition error"):
+        await adapter_fixture.get_definition(test_file, line, char)
 
 @pytest.mark.asyncio
-async def test_get_references(adapter, project_root, stdout_buffer, stdin_buffer):
-    await adapter.start_server()
-    stdout_buffer.write(create_lsp_response(1, {"capabilities": {}})) # initialize
-    await adapter.initialize()
+async def test_get_references(adapter_fixture, project_root, mock_language_server_instance):
+    await adapter_fixture.start_server_and_initialize()
 
-    test_file = project_root / "test_file.py"
+    test_file = project_root / "another.py"
+    expected_relative_path = "another.py"
     line, char = 3, 8
-
-    ref_response_payload = [{"uri": test_file.as_uri(), "range": {"start": {"line": 2, "character": 2}}}]
-    stdout_buffer.write(create_lsp_response(adapter._message_id_counter + 1, ref_response_payload))
     
-    response = await adapter.get_references(test_file, line, char)
-    assert response == ref_response_payload
+    mock_response = [{"uri": test_file.as_uri(), "range": {"start": {"line": 2, "character": 2}}}]
+    mock_language_server_instance.request_references.return_value = mock_response
+        
+    response = await adapter_fixture.get_references(test_file, line, char, include_declaration=False) # Test with include_declaration=False first
+    
+    mock_language_server_instance.request_references.assert_called_once_with(str(expected_relative_path), line, char)
+    assert response == mock_response
+    
+    # Test include_declaration=True (should print warning but still call)
+    mock_language_server_instance.request_references.reset_mock() # Reset for next call
+    await adapter_fixture.get_references(test_file, line, char, include_declaration=True)
+    mock_language_server_instance.request_references.assert_called_once_with(str(expected_relative_path), line, char)
 
-    requests = get_written_json_requests(stdin_buffer)
-    references_request = requests[-1]
-    assert references_request['method'] == "textDocument/references"
-    assert references_request['params']['textDocument']['uri'] == test_file.as_uri()
-    assert references_request['params']['position'] == {"line": line, "character": char}
-    assert references_request['params']['context']['includeDeclaration'] is True
 
 @pytest.mark.asyncio
-async def test_shutdown_and_close(adapter, mock_proc, stdout_buffer, stdin_buffer):
-    await adapter.start_server()
-    stdout_buffer.write(create_lsp_response(1, {"capabilities": {}})) # initialize
-    await adapter.initialize()
-
-    stdout_buffer.write(create_lsp_response(adapter._message_id_counter + 1, {})) # shutdown response
-    await adapter.shutdown()
-
-    requests = get_written_json_requests(stdin_buffer)
-    shutdown_request = requests[-1]
-    assert shutdown_request['method'] == "shutdown"
+async def test_shutdown_server(adapter_fixture, mock_language_server_instance):
+    # Start the server first
+    await adapter_fixture.start_server_and_initialize()
+    assert adapter_fixture._is_server_active is True
+    assert adapter_fixture._server_context is not None
     
-    mock_proc.terminate.assert_not_called() 
-    mock_proc.poll.return_value = 0 # Simulate process exited after shutdown
+    # Get the mock for the context manager returned by start_server()
+    server_context_mock = mock_language_server_instance.start_server.return_value
+
+    await adapter_fixture.shutdown_server()
     
-    await adapter.close() 
-    mock_proc.terminate.assert_not_called()
-    assert adapter.process is None
+    server_context_mock.__aexit__.assert_called_once()
+    assert adapter_fixture._is_server_active is False
+    assert adapter_fixture._server_context is None
+
+    # Test shutting down when not active
+    server_context_mock.__aexit__.reset_mock()
+    await adapter_fixture.shutdown_server() # Should do nothing and not error
+    server_context_mock.__aexit__.assert_not_called()
+
 
 @pytest.mark.asyncio
-async def test_shutdown_timeout_and_terminate(adapter, mock_proc, stdout_buffer, stdin_buffer, mocker):
-    await adapter.start_server()
-    stdout_buffer.write(create_lsp_response(1, {"capabilities": {}})) # initialize
-    await adapter.initialize()
-
-    stdout_buffer.write(create_lsp_response(adapter._message_id_counter + 1, {})) # shutdown response
+async def test_file_not_relative_to_project_root(adapter_fixture):
+    await adapter_fixture.start_server_and_initialize()
     
-    # Patch Popen.wait on the specific mock_proc instance
-    mocker.patch.object(mock_proc, 'wait', side_effect=subprocess.TimeoutExpired(cmd="cmd", timeout=0.1))
+    # Path outside the mocked project_root
+    non_relative_file = Path("/other/place/file.py")
+
+    with pytest.raises(ValueError, match=f"File path {non_relative_file} must be relative to project root {adapter_fixture.project_root} for multilspy."):
+        await adapter_fixture.open_document(non_relative_file)
     
-    await adapter.shutdown() 
+    with pytest.raises(ValueError, match=f"File path {non_relative_file} must be relative to project root {adapter_fixture.project_root} for multilspy."):
+        await adapter_fixture.get_definition(non_relative_file, 0, 0)
 
-    mock_proc.wait.assert_called_once()
-    mock_proc.terminate.assert_called_once()
-    
-    mock_proc.poll.return_value = 1 # Simulate terminated
-    await adapter.close()
-    assert adapter.process is None
+    with pytest.raises(ValueError, match=f"File path {non_relative_file} must be relative to project root {adapter_fixture.project_root} for multilspy."):
+        await adapter_fixture.get_references(non_relative_file, 0, 0)
 
-@pytest.mark.asyncio
-async def test_request_error_handling(adapter, project_root, stdout_buffer, stdin_buffer):
-    await adapter.start_server()
-    stdout_buffer.write(create_lsp_response(1, {"capabilities": {}})) # initialize
-    await adapter.initialize()
-
-    error_payload = {"code": -32600, "message": "Invalid Request"}
-    stdout_buffer.write(create_lsp_response(adapter._message_id_counter + 1, error=error_payload))
-    
-    with pytest.raises(RuntimeError, match="LSP Error:.*Invalid Request"):
-        await adapter.get_definition(project_root / "test.py", 0, 0)
-
-@pytest.mark.asyncio
-async def test_malformed_response_json(adapter, project_root, stdout_buffer, stdin_buffer):
-    await adapter.start_server()
-    stdout_buffer.write(create_lsp_response(1, {"capabilities": {}})) # initialize
-    await adapter.initialize()
-
-    malformed_json_response = "Content-Length: 10\r\n\r\n{oops".encode('utf-8')
-    stdout_buffer.write(malformed_json_response)
-    
-    with pytest.raises(json.JSONDecodeError):
-        await adapter.get_definition(project_root / "test.py", 0, 0)
-
-@pytest.mark.asyncio
-async def test_malformed_response_header(adapter, project_root, stdout_buffer, stdin_buffer):
-    await adapter.start_server()
-    stdout_buffer.write(create_lsp_response(1, {"capabilities": {}})) # initialize
-    await adapter.initialize()
-
-    # Simulate stderr output for debugging the test itself
-    mock_proc_instance = adapter.process # Get the actual mock_proc used by the adapter
-    mock_proc_instance.stderr.read.return_value = b"Some error from LSP server stderr"
-
-
-    malformed_header_response = "NotContentLength: 10\r\n\r\n{}".encode('utf-8')
-    stdout_buffer.write(malformed_header_response)
-    
-    with pytest.raises(ValueError, match="Invalid response header from LSP server"):
-        await adapter.get_definition(project_root / "test.py", 0, 0)
-
-@pytest.mark.asyncio
-async def test_server_already_running(adapter, mock_popen_constructor):
-    await adapter.start_server() # First start
-    mock_popen_constructor.assert_called_once()
-    
-    await adapter.start_server() # Second start
-    mock_popen_constructor.assert_called_once() # Should not be called again
+# Removed tests:
+# - test_request_error_handling (covered by specific request tests)
+# - test_malformed_response_json (multilspy handles this layer)
+# - test_malformed_response_header (multilspy handles this layer)
+# - test_shutdown_timeout_and_terminate (multilspy handles process management)
+# - test_server_already_running (LSPAdapter.start_server_and_initialize has basic check, 
+#   and multilspy might have its own idempotency for start_server call)
+# The old `adapter` fixture's teardown and the complex subprocess mocking fixtures are also gone.
+# The new `adapter_fixture` handles teardown via `shutdown_server`.

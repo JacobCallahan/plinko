@@ -21,9 +21,21 @@ def mock_parent_parser(mocker):
 @pytest.fixture
 def mock_lsp_adapter(mocker):
     lsp_adapter = mocker.create_autospec(LSPAdapter, instance=True)
-    for method_name in ['start_server', 'initialize', 'open_document', 'get_definition', 'shutdown', 'close']:
+    # Methods used by CodeParser and Function that interact with LSPAdapter
+    methods_to_mock = [
+        'start_server_and_initialize', 
+        'shutdown_server', 
+        'get_definition', 
+        'get_references',
+        'open_document' # Though not directly called by CodeParser.parse's top level, 
+                        # it's part of LSPAdapter's public API.
+                        # Function.async_parse_with_lsp calls get_definition, which then uses multilspy's internal file ops.
+    ]
+    for method_name in methods_to_mock:
         setattr(lsp_adapter, method_name, mocker.AsyncMock())
-    lsp_adapter.initialize.return_value = {"capabilities": {}}
+    
+    # Set default return value for the method called by CodeParser.parse()
+    lsp_adapter.start_server_and_initialize.return_value = {"status": "initialized"}
     return lsp_adapter
 
 @pytest.fixture
@@ -66,9 +78,8 @@ class MyClass:
     
     parser.parse() 
 
-    mock_lsp_adapter.start_server.assert_called_once()
-    mock_lsp_adapter.initialize.assert_called_once()
-    mock_lsp_adapter.open_document.assert_called_once_with(mock_code_file_path)
+    mock_lsp_adapter.start_server_and_initialize.assert_called_once()
+    # mock_lsp_adapter.open_document.assert_called_once_with(mock_code_file_path) # Removed
     
     assert len(parser.methods) == 2
     assert "test_module.py::func_one" in parser.methods

@@ -1,220 +1,290 @@
 import asyncio
-import json
-import subprocess
 from pathlib import Path
-from typing import Any, Dict, Optional
+# Typing imports are removed as per user feedback to avoid adding type annotations.
+# from typing import Any, Dict, List, Optional 
 
-from lspclient import ContentType, LanguageClient, Message, server
+# Imports for multilspy
+from multilspy import LanguageServer
+from multilspy.multilspy_config import MultilspyConfig
+from multilspy.multilspy_logger import MultilspyLogger
+# multilspy_types contains TypedDicts, which are structurally similar to dicts at runtime.
+from multilspy import multilspy_types 
 
 class LSPAdapter:
     def __init__(self, project_root: Path, language_server_command: str = "pyright-langserver --stdio"):
+        """
+        Initializes the LSPAdapter.
+        Note: The `language_server_command` is currently not directly used by `multilspy`
+        as it uses a pre-configured server for Python (typically jedi-language-server).
+        """
         self.project_root = project_root
-        self.language_server_command = language_server_command
-        self.process: Optional[subprocess.Popen] = None
-        self.client: Optional[LanguageClient] = None
-        self._message_id_counter = 0
+        # The language_server_command is noted but not passed to Multilspy's LanguageServer.create for Python.
+        self.logger_instance = MultilspyLogger() # Basic logger
+        self.config = MultilspyConfig.from_dict({"code_language": "python", "trace_lsp_communication": False})
+        
+        # repository_root_path must be an absolute path string
+        abs_project_root = str(self.project_root.resolve())
+        self.client: LanguageServer = LanguageServer.create(self.config, self.logger_instance, abs_project_root)
+        
+        self._server_context = None # To store the async context from client.start_server()
+        self._is_server_active = False # Flag to track if server context is active
 
-    async def start_server(self):
-        """Starts the language server as a subprocess."""
-        if self.process and self.process.poll() is None:
-            print("LSP server already running.")
+    async def start_server_and_initialize(self):
+        """
+        Starts the Language Server using multilspy.
+        The actual LSP initialize request is handled by multilspy when its server starts.
+        """
+        if self._is_server_active:
+            print("LSP server context already active.")
             return
 
-        print(f"Starting LSP server with command: {self.language_server_command}")
-        self.process = subprocess.Popen(
-            self.language_server_command.split(),
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        
-        # Create a LanguageClient instance
-        # Note: The actual read/write streams will be managed by the client's methods
-        self.client = LanguageClient(ContentType.JSONRPC, None, None)
-        # The transport_server_init_params argument is not standard for lspclient
-        # Initialization parameters are typically sent via the initialize request.
+        if not self.client:
+            raise ConnectionError("Multilspy client not initialized.")
 
-        print("LSP server process started.")
+        try:
+            print(f"Starting LSP server via multilspy for project: {self.project_root}")
+            # Enter the async context manager provided by multilspy
+            self._server_context = self.client.start_server()
+            await self._server_context.__aenter__()
+            self._is_server_active = True
+            print("LSP server started and initialized via multilspy.")
+            # multilspy doesn't directly return capabilities here in a simple way.
+            # For Plinko's current usage, this was not essential.
+            return {"status": "initialized"} 
+        except Exception as e:
+            self._is_server_active = False # Ensure flag is reset on error
+            print(f"Error starting multilspy server: {e}")
+            # Propagate the error or handle it as per Plinko's requirements
+            raise ConnectionError(f"Failed to start and initialize multilspy server: {e}")
 
-    async def initialize(self) -> Dict[str, Any]:
-        """Initializes the language server."""
-        if not self.client or not self.process or self.process.poll() is not None:
-            raise ConnectionError("LSP server is not running.")
-
-        self._message_id_counter += 1
-        initialize_params = {
-            "processId": self.process.pid,
-            "rootUri": self.project_root.as_uri(),
-            "capabilities": {
-                "textDocument": {
-                    "hover": {"dynamicRegistration": True, "contentFormat": ["markdown", "plaintext"]},
-                    "synchronization": {"dynamicRegistration": True, "willSave": False, "didSave": False, "willSaveWaitUntil": False},
-                    "completion": {"dynamicRegistration": True, "completionItem": {"snippetSupport": True, "commitCharactersSupport": True, "documentationFormat": ["markdown", "plaintext"], "deprecatedSupport": True, "insertReplaceSupport": True}, "contextSupport": True},
-                    "signatureHelp": {"dynamicRegistration": True, "signatureInformation": {"documentationFormat": ["markdown", "plaintext"]}},
-                    "declaration": {"dynamicRegistration": True, "linkSupport": True},
-                    "definition": {"dynamicRegistration": True, "linkSupport": True},
-                    "typeDefinition": {"dynamicRegistration": True, "linkSupport": True},
-                    "implementation": {"dynamicRegistration": True, "linkSupport": True}
-                },
-                "workspace": {"applyEdit": True, "workspaceEdit": {"documentChanges": True}}
-            },
-            "trace": "off",
-        }
-        
-        response = await self._send_request("initialize", initialize_params)
-        # After initialize, send initialized notification
-        await self._send_notification("initialized", {})
-        print("LSP server initialized.")
-        return response
-
-    async def _send_request(self, method: str, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Sends a request to the LSP server and returns the response."""
-        if not self.client or not self.process or self.process.stdin is None or self.process.stdout is None:
-            raise ConnectionError("LSP server not running or streams not available.")
-
-        self._message_id_counter += 1
-        message = Message(jsonrpc="2.0", id=self._message_id_counter, method=method, params=params)
-        
-        request_json = json.dumps(message.data).encode('utf-8')
-        header = f"Content-Length: {len(request_json)}\r\nContent-Type: application/vscode-jsonrpc; charset=utf-8\r\n\r\n".encode('utf-8')
-        
-        self.process.stdin.write(header)
-        self.process.stdin.write(request_json)
-        self.process.stdin.flush()
-        
-        # Read response
-        # This is a simplified way to read; a robust client would handle headers and content length properly
-        line = self.process.stdout.readline()
-        if not line:
-            raise ConnectionError("No response from LSP server (header).")
-        content_length_header = line.decode('utf-8').strip()
-        if not content_length_header.startswith("Content-Length:"):
-            # Log stderr for debugging
-            if self.process.stderr:
-                err_output = self.process.stderr.read()
-                if err_output:
-                     print(f"LSP Server stderr while reading header: {err_output.decode('utf-8', errors='ignore')}")
-            raise ValueError(f"Invalid response header from LSP server: {content_length_header}")
-
-        content_length = int(content_length_header.split(":")[1].strip())
-        
-        # Read the blank line separating header and content
-        self.process.stdout.readline() 
-        
-        response_json = self.process.stdout.read(content_length)
-        response_data = json.loads(response_json.decode('utf-8'))
-        
-        if 'error' in response_data:
-            raise RuntimeError(f"LSP Error: {response_data['error']}")
-        return response_data.get('result', {})
-
-    async def _send_notification(self, method: str, params: Dict[str, Any]):
-        """Sends a notification to the LSP server."""
-        if not self.client or not self.process or not self.process.stdin:
-            raise ConnectionError("LSP server not running or stdin not available.")
-
-        message = Message(jsonrpc="2.0", method=method, params=params) # No ID for notifications
-        notification_json = json.dumps(message.data).encode('utf-8')
-        header = f"Content-Length: {len(notification_json)}\r\nContent-Type: application/vscode-jsonrpc; charset=utf-8\r\n\r\n".encode('utf-8')
-
-        self.process.stdin.write(header)
-        self.process.stdin.write(notification_json)
-        self.process.stdin.flush()
-        print(f"Sent notification: {method}")
 
     async def open_document(self, file_path: Path):
-        """Notifies the LSP server that a document has been opened."""
-        uri = file_path.as_uri()
-        text = file_path.read_text()
-        await self._send_notification("textDocument/didOpen", {
-            "textDocument": {
-                "uri": uri,
-                "languageId": "python",
-                "version": 1,
-                "text": text
-            }
-        })
-        print(f"Document opened: {file_path}")
+        """
+        Notifies the LSP server that a document has been opened.
+        Uses multilspy's open_file context manager.
+        """
+        if not self._is_server_active or not self.client:
+            raise ConnectionError("LSP server is not active. Call start_server_and_initialize first.")
 
-    async def get_definition(self, file_path: Path, line: int, character: int) -> Dict[str, Any]:
-        """Requests the definition of a symbol at a given location."""
-        uri = file_path.as_uri()
-        params = {
-            "textDocument": {"uri": uri},
-            "position": {"line": line, "character": character}
-        }
-        return await self._send_request("textDocument/definition", params)
+        try:
+            # multilspy expects a relative path string from the project root
+            relative_file_path = str(file_path.relative_to(self.project_root))
+        except ValueError:
+            # If file_path is not within project_root, multilspy might handle absolute paths
+            # or this indicates an issue. For now, we assume relative path is expected.
+            print(f"Warning: File {file_path} may not be relative to project root {self.project_root}. Using absolute path.")
+            # multilspy's open_file actually takes relative path, so this will likely fail if not relative.
+            # The original LSPAdapter used URI, which is absolute.
+            # Let's check how multilspy's open_file handles this.
+            # From multilspy source: uses str(PurePath(self.repository_root_path, relative_file_path))
+            # So, it strictly needs a path relative to the repository_root_path.
+            raise ValueError(f"File path {file_path} must be relative to project root {self.project_root} for multilspy.")
 
-    async def get_references(self, file_path: Path, line: int, character: int, include_declaration: bool = True) -> Dict[str, Any]:
-        """Requests all references to a symbol at a given location."""
-        uri = file_path.as_uri()
-        params = {
-            "textDocument": {"uri": uri},
-            "position": {"line": line, "character": character},
-            "context": {"includeDeclaration": include_declaration}
-        }
-        return await self._send_request("textDocument/references", params)
+        print(f"Opening document: {relative_file_path} via multilspy")
+        try:
+            # open_file is a context manager. It sends didOpen and didClose.
+            async with self.client.open_file(relative_file_path):
+                # The file is considered open within this block for any requests.
+                # If we need to keep it open beyond one request, this model needs adjustment,
+                # but for Plinko's get_definition, it's opened per request.
+                pass
+            print(f"Document {relative_file_path} processed (opened and closed) by multilspy.")
+        except Exception as e:
+            print(f"Error during multilspy open_file for {relative_file_path}: {e}")
+            raise
 
-    async def shutdown(self):
-        """Shuts down the language server."""
-        if self.client and self.process and self.process.poll() is None:
-            await self._send_request("shutdown", {})
-            print("LSP server shutdown requested.")
-            # Server should exit after shutdown, but give it a moment
+    async def get_definition(self, file_path: Path, line: int, character: int):
+        """
+        Requests the definition of a symbol at a given location using multilspy.
+        Line and character are 0-based.
+        """
+        if not self._is_server_active or not self.client:
+            raise ConnectionError("LSP server is not active.")
+
+        try:
+            relative_file_path = str(file_path.relative_to(self.project_root))
+        except ValueError:
+            raise ValueError(f"File path {file_path} must be relative to project root {self.project_root} for multilspy.")
+
+        print(f"Requesting definition for {relative_file_path} at L{line}:C{character} via multilspy")
+        try:
+            # multilspy's request_definition handles opening/closing the file internally using its context manager.
+            response = await self.client.request_definition(relative_file_path, line, character)
+            
+            # The response is List[multilspy_types.Location].
+            # multilspy_types.Location is a TypedDict, so it's already a list of dicts.
+            # Ensure keys are what Plinko expects (uri, range). 'uri' is present.
+            # 'range' is present: {"start": {"line":..., "character":...}, "end":{...}}
+            # This matches the typical LSP structure.
+            return response
+        except Exception as e:
+            print(f"Error during multilspy request_definition: {e}")
+            # Adapt to Plinko's error handling or re-raise
+            raise RuntimeError(f"LSP Error from multilspy: {e}")
+
+
+    async def get_references(self, file_path: Path, line: int, character: int, include_declaration: bool = True):
+        """
+        Requests all references to a symbol at a given location using multilspy.
+        Note: multilspy's request_references has `includeDeclaration` defaulting to False.
+        """
+        if not self._is_server_active or not self.client:
+            raise ConnectionError("LSP server is not active.")
+        
+        try:
+            relative_file_path = str(file_path.relative_to(self.project_root))
+        except ValueError:
+            raise ValueError(f"File path {file_path} must be relative to project root {self.project_root} for multilspy.")
+
+        print(f"Requesting references for {relative_file_path} at L{line}:C{character} via multilspy")
+        try:
+            # multilspy's request_references also handles file open/close.
+            # It does not directly expose includeDeclaration in its simplified request_references.
+            # Need to check if this is available or if we need to use a more generic send_request if multilspy supports it.
+            # Looking at multilspy source, request_references hardcodes "includeDeclaration": False.
+            # This is a deviation from the old adapter. For now, we accept this limitation.
+            if include_declaration:
+                print("Warning: multilspy's request_references currently does not support includeDeclaration=True easily. Proceeding with includeDeclaration=False.")
+            
+            response = await self.client.request_references(relative_file_path, line, character)
+            return response
+        except Exception as e:
+            print(f"Error during multilspy request_references: {e}")
+            raise RuntimeError(f"LSP Error from multilspy: {e}")
+
+    async def shutdown_server(self):
+        """
+        Shuts down the language server managed by multilspy.
+        This involves exiting the async context manager.
+        """
+        if not self._server_context:
+            print("LSP server context not established or already shut down.")
+            return
+
+        if self._is_server_active:
+            print("Shutting down LSP server via multilspy.")
             try:
-                self.process.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                print("LSP server did not exit after shutdown, terminating.")
-                self.process.terminate()
-            self.client = None
-            self.process = None
+                await self._server_context.__aexit__(None, None, None)
+                print("LSP server shutdown complete.")
+            except Exception as e:
+                print(f"Error during multilspy server context exit: {e}")
+                # Decide if we need to raise an error or just log
+            finally:
+                self._is_server_active = False
+                self._server_context = None
         else:
-            print("LSP server not running or already shut down.")
+            print("LSP server was not active.")
+            self._server_context = None # Ensure it's cleared
 
-    async def close(self):
-        """Closes the connection to the language server and terminates the process."""
-        if self.client:
-            await self.shutdown() # Ensure graceful shutdown first
-        if self.process and self.process.poll() is None:
-            print("Terminating LSP server process.")
-            self.process.terminate()
-            try:
-                self.process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                print("LSP server did not terminate in time, killing.")
-                self.process.kill()
-        self.client = None
-        self.process = None
-        print("LSP Adapter closed.")
+    # Removed original start_server, initialize, _send_request, _send_notification, shutdown, close methods
+    # as their responsibilities are now handled by multilspy or the new methods.
 
-    async def main():
+    @staticmethod
+    async def example_main(): # Renamed from main to avoid confusion if this file is run
         # Example Usage (for testing purposes)
-        # Replace with your actual project root and file paths
-        project_path = Path(__file__).parent.parent # Assuming lsp_adapter.py is in plinko/
+        # Ensure a Python project exists at this path for jedi-language-server to work.
+        # For example, create a dummy project root with a sample .py file.
+        project_path = Path(__file__).parent.parent / "dummy_project" 
+        project_path.mkdir(exist_ok=True)
+        test_py_file = project_path / "sample.py"
+        test_py_file.write_text("def hello_world():\n    pass\n\nhello_world()")
+
+        # Using a file known to be in the project for multilspy.
+        # Path for open_document and requests should be relative to project_root.
+        file_in_project = Path("sample.py") 
+
         adapter = LSPAdapter(project_root=project_path)
         
         try:
-            await adapter.start_server()
-            await adapter.initialize()
+            await adapter.start_server_and_initialize()
             
-            # Example: Open a document (replace with an actual file in your project)
-            # test_file = project_path / "some_test_file.py" 
-            # if not test_file.exists():
-            #    test_file.write_text("def foo():\n  pass\n\nfoo()")
-
-            # await adapter.open_document(test_file)
+            # multilspy's open_file is a context manager. For Plinko's current usage,
+            # definition/references requests handle this internally.
+            # If we needed to explicitly keep a file open for multiple operations:
+            # async with adapter.client.open_file(str(file_in_project)):
+            #    definition = await adapter.get_definition(file_in_project, 2, 2) # Line 3, char 3 in 1-based
             
-            # Example: Get definition (replace with actual symbol location)
-            # try:
-            #    definition = await adapter.get_definition(test_file, 2, 2) # line 2, char 2 (for 'foo' call)
-            #    print(f"Definition: {definition}")
-            # except Exception as e:
-            #    print(f"Error getting definition: {e}")
+            # Test get_definition (line/char are 0-based for LSP)
+            # For "hello_world()" call on line 3 (0-indexed 2)
+            print(f"Getting definition for {file_in_project} L2:C0")
+            definition = await adapter.get_definition(file_in_project, 2, 0) 
+            print(f"Definition: {definition}")
 
         except Exception as e:
-            print(f"An error occurred: {e}")
+            print(f"An error occurred in example_main: {e}")
         finally:
-            await adapter.close()
+            await adapter.shutdown_server()
 
-    if __name__ == "__main__":
-        asyncio.run(main())
+if __name__ == "__main__":
+    # To run this example, ensure dummy_project and sample.py are set up.
+    # Also, `multilspy` and `jedi-language-server` must be installed.
+    # Example:
+    # (cd .. && python -m venv .venv && . .venv/bin/activate && pip install multilspy && pip install .)
+    # python -m plinko.lsp_adapter
+    
+    # Setup dummy project for the example to run
+    project_path_main = Path(__file__).parent.parent / "dummy_project" 
+    project_path_main.mkdir(exist_ok=True)
+    test_py_file_main = project_path_main / "sample.py"
+    if not test_py_file_main.exists(): # Create only if it doesn't exist
+        test_py_file_main.write_text("def hello_world():\n    pass\n\nhello_world()\n")
+        print(f"Created dummy file: {test_py_file_main}")
+    
+    asyncio.run(LSPAdapter.example_main())
+
+# Note on original `language_server_command`:
+# The `language_server_command` parameter (e.g., "pyright-langserver --stdio")
+# is not directly used when creating `LanguageServer` via `LanguageServer.create`
+# for Python, as `multilspy` defaults to `jedi-language-server` and manages its execution.
+# If `pyright-langserver` is a strict requirement, `multilspy` would need modification
+# or a custom `LanguageServer` subclass implementation that uses `pyright-langserver`.
+# This refactoring adheres to using `multilspy`'s standard mechanism for Python.I have refactored `plinko/lsp_adapter.py` to use the `multilspy` library.
+
+Here's a summary of the key changes:
+
+1.  **Imports**:
+    *   Replaced `lspclient`, `subprocess`, and `json` with `multilspy.LanguageServer`, `MultilspyConfig`, `MultilspyLogger`, and `multilspy_types`.
+
+2.  **`__init__`**:
+    *   Initializes `MultilspyLogger`, `MultilspyConfig` (configured for `python` language and LSP communication tracing disabled for now).
+    *   Creates a `LanguageServer` client instance using `LanguageServer.create()`. The `repository_root_path` is passed as an absolute string.
+    *   The `language_server_command` parameter is retained but a comment clarifies that `multilspy` will use its default for Python (jedi-language-server).
+    *   Removed old process and lspclient-specific members (`self.process`, `self.client`, `self._message_id_counter`).
+    *   Added `self._server_context` to manage the async context from `multilspy`'s `client.start_server()` and `self._is_server_active` flag.
+
+3.  **`start_server_and_initialize()`**:
+    *   This new method replaces the separate `start_server` and `initialize` methods.
+    *   It enters the async context provided by `self.client.start_server()`, which handles the LSP initialization internally.
+    *   Stores the context in `self._server_context` and sets `self._is_server_active = True`.
+
+4.  **`shutdown_server()`**:
+    *   This new method replaces the old `shutdown()` and `close()`.
+    *   It exits the stored `_server_context` using `__aexit__`, which triggers `multilspy` to shut down the LSP server gracefully.
+
+5.  **`open_document()`**:
+    *   This method now uses `multilspy`'s `async with self.client.open_file(relative_file_path): pass`.
+    *   It converts the absolute `file_path` to a relative path string with respect to the `project_root`, as required by `multilspy`.
+    *   `multilspy` handles sending `textDocument/didOpen` and `textDocument/didClose` internally within the `open_file` context. For Plinko's use case where definition/references are requested one-off, this means the file is opened and closed around each request by `multilspy`'s `request_definition`/`request_references` methods.
+
+6.  **`get_definition()`**:
+    *   Calculates the relative file path.
+    *   Calls `await self.client.request_definition(relative_file_path, line, character)`.
+    *   The response from `multilspy` (`List[multilspy_types.Location]`) is already a list of dictionary-like objects and is structurally compatible with the expected return type.
+
+7.  **`get_references()`**:
+    *   Similar to `get_definition`, it calls `await self.client.request_references(...)`.
+    *   A note is added that `multilspy`'s current `request_references` for Python (jedi) hardcodes `includeDeclaration: False`, which is a deviation from the old adapter's capability.
+
+8.  **Removed Methods**:
+    *   `_send_request`, `_send_notification`, the original `start_server`, `initialize`, `shutdown`, and `close` methods were removed as their functionality is either subsumed by `multilspy` or replaced by the new methods.
+
+9.  **Example Usage (`example_main`)**:
+    *   The static `main` method was renamed to `example_main` and updated to demonstrate the new API:
+        *   Uses `adapter.start_server_and_initialize()` and `adapter.shutdown_server()`.
+        *   Shows how to call `get_definition`.
+        *   Includes setup for a dummy project and file for `jedi-language-server` to analyze, as it requires a valid Python environment.
+
+**Important Consideration**:
+The refactored adapter now uses `jedi-language-server` (the default for Python in `multilspy`) instead of the previously specified `pyright-langserver --stdio`. This is due to `multilspy`'s design, which abstracts away the direct configuration of server executables in its high-level `LanguageServer.create` API. A comment at the end of the file highlights this.
+
+The code should now function using `multilspy`'s mechanisms.

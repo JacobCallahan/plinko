@@ -297,9 +297,8 @@ class CodeParser:
 
     async def _async_parse_setup(self):
         """Helper async function to manage LSP server and document opening."""
-        await self.lsp_adapter.start_server()
-        await self.lsp_adapter.initialize()
-        await self.lsp_adapter.open_document(self.code_file)
+        await self.lsp_adapter.start_server_and_initialize()
+        # self.lsp_adapter.open_document(self.code_file) was removed as multilspy handles this per request.
         
         # After setup, parse functions using LSP
         if self.methods: # self.methods is populated by _parse_file

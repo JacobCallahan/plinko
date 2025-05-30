@@ -9,7 +9,7 @@ with open("README.md") as readme_file:
 with open("HISTORY.rst") as history_file:
     history = history_file.read()
 
-requirements = ["click", "dynaconf", "logzero", "pyyaml", "xdg-base-dirs", "python-lsp-client", "pyright"]
+requirements = ["click", "dynaconf", "logzero", "pyyaml", "xdg-base-dirs", "pyright", "multilspy"]
 print(find_packages())
 setup(
     name="plinko",
