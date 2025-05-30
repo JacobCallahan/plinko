@@ -36,4 +36,5 @@ Homepage = "https://github.com/JacobCallahan/plinko"
 plinko = "plinko.commands:cli"
 
 [tool.setuptools]
-packages = ["plinko", "plinko.parsers"]
+[tool.setuptools.packages.find]
+include = ["plinko*"]
