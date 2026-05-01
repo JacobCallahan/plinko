@@ -10,7 +10,6 @@ with open("HISTORY.rst") as history_file:
     history = history_file.read()
 
 requirements = ["click", "dynaconf", "logzero", "pyyaml", "xdg-base-dirs", "pyright", "multilspy"]
-print(find_packages())
 setup(
     name="plinko",
     version="0.2.0",

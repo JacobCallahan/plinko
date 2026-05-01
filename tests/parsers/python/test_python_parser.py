@@ -5,7 +5,7 @@ from pathlib import Path
 
 from plinko.parsers.python_parser import CodeParser as PythonCodeParser
 from plinko.parsers.python_parser import Function
-from plinko.lsp_adapter import LSPAdapter # Used for mock type
+from plinko.lsp_adapter import LSPAdapter  # Used for mock type
 
 
 @pytest.fixture
@@ -15,49 +15,36 @@ def mock_parent_parser(mocker):
     mp_parser.entities = ["nailgun", "another_entity"]
     mp_parser.create_on_instance = False
     mp_parser.fixture_handler = mocker.Mock()
-    mp_parser.fixture_handler.fixtures = {} 
+    mp_parser.fixture_handler.fixtures = {}
     return mp_parser
 
 @pytest.fixture
 def mock_lsp_adapter(mocker):
     lsp_adapter = mocker.create_autospec(LSPAdapter, instance=True)
-    # Methods used by CodeParser and Function that interact with LSPAdapter
     methods_to_mock = [
-        'start_server_and_initialize', 
-        'shutdown_server', 
-        'get_definition', 
+        'start_server_and_initialize',
+        'shutdown_server',
+        'get_definition',
         'get_references',
-        'open_document' # Though not directly called by CodeParser.parse's top level, 
-                        # it's part of LSPAdapter's public API.
-                        # Function.async_parse_with_lsp calls get_definition, which then uses multilspy's internal file ops.
+        'open_document',
     ]
     for method_name in methods_to_mock:
         setattr(lsp_adapter, method_name, mocker.AsyncMock())
-    
-    # Set default return value for the method called by CodeParser.parse()
     lsp_adapter.start_server_and_initialize.return_value = {"status": "initialized"}
     return lsp_adapter
 
 @pytest.fixture
 def mock_lsp_adapter_constructor(mocker, mock_lsp_adapter):
-    # This fixture ensures that when PythonCodeParser creates an LSPAdapter, it gets our mock_lsp_adapter.
-    # The patch is active for the duration of the test that uses this fixture.
     return mocker.patch('plinko.parsers.python_parser.LSPAdapter', return_value=mock_lsp_adapter)
 
 @pytest.fixture
-def mock_code_file_path(mocker):
-    m_path = mocker.create_autospec(Path, instance=True)
-    m_path.exists.return_value = True
-    m_path.absolute.return_value = m_path
-    m_path.as_uri.return_value = "file:///fake/project/test_module.py"
-    m_path.name = "test_module.py"
-    m_path.stem = "test_module"
-    return m_path
+def mock_code_file_path(tmp_path):
+    code_file = tmp_path / "test_module.py"
+    code_file.write_text("")
+    return code_file
 
 def _create_parser_helper(code_string, mock_code_file_path_fixture, mock_parent_parser_fixture, mock_lsp_adapter_constructor_fixture):
-    # mock_lsp_adapter_constructor_fixture needs to be active when PythonCodeParser is instantiated.
-    # This is ensured if it's a dependency of the test function.
-    mock_code_file_path_fixture.read_text.return_value = code_string
+    mock_code_file_path_fixture.write_text(code_string)
     parser = PythonCodeParser(mock_code_file_path_fixture, mock_parent_parser_fixture)
     return parser
 
@@ -82,7 +69,7 @@ class MyClass:
     # mock_lsp_adapter.open_document.assert_called_once_with(mock_code_file_path) # Removed
     
     assert len(parser.methods) == 2
-    assert "test_module.py::func_one" in parser.methods
+    assert "test_module.py:func_one" in parser.methods
     assert "test_module.py:MyClass:method_a" in parser.methods
     
     assert mock_func_lsp_parse.call_count == 2
@@ -97,14 +84,15 @@ def my_func():
     parser = _create_parser_helper(code, mock_code_file_path, mock_parent_parser, mock_lsp_adapter_constructor)
     parser._parse_file() 
     
-    func_obj = parser.methods.get("test_module.py::my_func")
+    func_obj = parser.methods.get("test_module.py:my_func")
     assert func_obj is not None
 
     def mock_get_definition_side_effect(file_path, line, char):
-        if line == 1: # AST line 2 for call_one()
+        # Code string starts with \n, so call_one() is at AST line 3 (1-based), 0-based = 2
+        if line == 2:  # call_one()
             return [{"uri": "file:///fake/project/lib.py", "range": {"start": {"line": 10, "character": 0}}}]
-        elif line == 2: # AST line 3 for another_module.call_two()
-             return [{"uri": "file:///fake/project/another_module.py", "range": {"start": {"line": 5, "character": 0}}}]
+        elif line == 3:  # another_module.call_two()
+            return [{"uri": "file:///fake/project/another_module.py", "range": {"start": {"line": 5, "character": 0}}}]
         return None
     mock_lsp_adapter.get_definition.side_effect = mock_get_definition_side_effect
     
@@ -122,7 +110,7 @@ def analyze_data():
     mock_parent_parser.entities = ["nailgun"] 
     parser = _create_parser_helper(code, mock_code_file_path, mock_parent_parser, mock_lsp_adapter_constructor)
     parser._parse_file()
-    func_obj = parser.methods.get("test_module.py::analyze_data")
+    func_obj = parser.methods.get("test_module.py:analyze_data")
     assert func_obj is not None
 
     mock_lsp_adapter.get_definition.return_value = [
@@ -144,7 +132,7 @@ def create_client():
     mock_parent_parser.create_on_instance = True 
     parser = _create_parser_helper(code, mock_code_file_path, mock_parent_parser, mock_lsp_adapter_constructor)
     parser._parse_file()
-    func_obj = parser.methods.get("test_module.py::create_client")
+    func_obj = parser.methods.get("test_module.py:create_client")
     assert func_obj is not None
 
     mock_lsp_adapter.get_definition.return_value = [
@@ -165,18 +153,18 @@ def try_something():
 """
     parser = _create_parser_helper(code, mock_code_file_path, mock_parent_parser, mock_lsp_adapter_constructor)
     parser._parse_file()
-    func_obj = parser.methods.get("test_module.py::try_something")
+    func_obj = parser.methods.get("test_module.py:try_something")
     assert func_obj is not None
 
     mock_lsp_adapter.get_definition.return_value = None 
     
     await func_obj.async_parse_with_lsp()
-    assert "UNRESOLVED:non_existent_call()" in func_obj.calls
+    assert "UNRESOLVED:non_existent_call" in func_obj.calls
 
-    func_obj.calls.clear() 
+    func_obj.calls.clear()
     mock_lsp_adapter.get_definition.side_effect = Exception("LSP exploded")
     await func_obj.async_parse_with_lsp()
-    assert "ERROR_RESOLVING:non_existent_call()" in func_obj.calls
+    assert "ERROR_RESOLVING:non_existent_call" in func_obj.calls
 
 def test_function_decorator_and_fixture_identification(mock_parent_parser, mock_lsp_adapter_constructor, mock_code_file_path): # No async needed
     code = """
@@ -196,21 +184,21 @@ def decorated_func():
     parser = _create_parser_helper(code, mock_code_file_path, mock_parent_parser, mock_lsp_adapter_constructor)
     parser._parse_file() 
 
-    fixture_func = parser.methods.get("test_module.py::my_fixture")
-    test_func = parser.methods.get("test_module.py::test_something")
-    decorated_f = parser.methods.get("test_module.py::decorated_func")
+    fixture_func = parser.methods.get("test_module.py:my_fixture")
+    test_func = parser.methods.get("test_module.py:test_something")
+    decorated_f = parser.methods.get("test_module.py:decorated_func")
 
     assert fixture_func is not None
     assert fixture_func.is_fixture is True
     assert fixture_func.is_test is False
-    assert "@pytest.fixture" in fixture_func.decs 
+    assert "pytest.fixture" in fixture_func.decs
 
     assert test_func is not None
     assert test_func.is_test is True
     assert test_func.is_fixture is False
     
     assert decorated_f is not None
-    assert "@another_decorator" in decorated_f.decs
+    assert "another_decorator" in decorated_f.decs
 
 @pytest.mark.asyncio
 async def test_code_parser_match_fixtures(mock_parent_parser, mock_lsp_adapter, mock_lsp_adapter_constructor, mock_code_file_path, mocker):
@@ -239,8 +227,8 @@ def test_with_fixture(setup_fixture):
 
     parser.parse() 
 
-    fixture_func = parser.methods.get("test_module.py::setup_fixture")
-    test_func = parser.methods.get("test_module.py::test_with_fixture")
+    fixture_func = parser.methods.get("test_module.py:setup_fixture")
+    test_func = parser.methods.get("test_module.py:test_with_fixture")
 
     assert fixture_func is not None
     assert test_func is not None
