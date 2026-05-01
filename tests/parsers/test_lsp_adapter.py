@@ -89,27 +89,24 @@ async def test_init_creates_multilspy_client(adapter_fixture, project_root, mock
 @pytest.mark.asyncio
 async def test_start_server_and_initialize(adapter_fixture, mock_language_server_instance):
     response = await adapter_fixture.start_server_and_initialize()
-    
+
     # Check that multilspy client's start_server context manager was entered
     mock_language_server_instance.start_server.assert_called_once()
     mock_language_server_instance.start_server.return_value.__aenter__.assert_called_once()
-    
+
     assert adapter_fixture._is_server_active is True
-    assert response == {"status": "initialized"}
+    assert response is None
 
     # Test starting again (should be idempotent based on LSPAdapter logic)
     await adapter_fixture.start_server_and_initialize()
-    mock_language_server_instance.start_server.assert_called_once() # Should not be called again
+    mock_language_server_instance.start_server.assert_called_once()  # Should not be called again
 
 @pytest.mark.asyncio
 async def test_open_document(adapter_fixture, project_root, mock_language_server_instance, mocker):
     await adapter_fixture.start_server_and_initialize() # Server must be active
 
     test_file = project_root / "module" / "file.py"
-    expected_relative_path = "module/file.py" # Path.relative_to gives POSIX paths
-
-    # For Windows compatibility in test assertion if Path objects are used directly
-    # expected_relative_path_obj = Path("module") / "file.py"
+    expected_relative_path = (test_file.relative_to(project_root)).as_posix()
 
 
     await adapter_fixture.open_document(test_file)

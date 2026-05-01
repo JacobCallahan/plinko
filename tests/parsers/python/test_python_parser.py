@@ -30,7 +30,7 @@ def mock_lsp_adapter(mocker):
     ]
     for method_name in methods_to_mock:
         setattr(lsp_adapter, method_name, mocker.AsyncMock())
-    lsp_adapter.start_server_and_initialize.return_value = {"status": "initialized"}
+    lsp_adapter.start_server_and_initialize.return_value = None
     return lsp_adapter
 
 @pytest.fixture

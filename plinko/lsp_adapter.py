@@ -1,4 +1,3 @@
-import asyncio
 from pathlib import Path
 
 from logzero import logger
@@ -36,7 +35,6 @@ class LSPAdapter:
             await self._server_context.__aenter__()
             self._is_server_active = True
             logger.info("LSP server started and initialized via multilspy.")
-            return {"status": "initialized"}
         except Exception as e:
             self._is_server_active = False
             logger.error(f"Error starting multilspy server: {e}")
@@ -50,7 +48,7 @@ class LSPAdapter:
             )
 
         try:
-            relative_file_path = str(file_path.relative_to(self.project_root))
+            relative_file_path = file_path.relative_to(self.project_root).as_posix()
         except ValueError:
             raise ValueError(
                 f"File path {file_path} must be relative to project root {self.project_root} for multilspy."
@@ -73,7 +71,7 @@ class LSPAdapter:
             raise ConnectionError("LSP server is not active.")
 
         try:
-            relative_file_path = str(file_path.relative_to(self.project_root))
+            relative_file_path = file_path.relative_to(self.project_root).as_posix()
         except ValueError:
             raise ValueError(
                 f"File path {file_path} must be relative to project root {self.project_root} for multilspy."
@@ -89,7 +87,7 @@ class LSPAdapter:
             raise RuntimeError(f"LSP Error from multilspy: {e}")
 
     async def get_references(
-        self, file_path: Path, line: int, character: int, include_declaration: bool = True
+        self, file_path: Path, line: int, character: int, include_declaration: bool = False
     ):
         """
         Requests all references to a symbol at a given location.
@@ -99,7 +97,7 @@ class LSPAdapter:
             raise ConnectionError("LSP server is not active.")
 
         try:
-            relative_file_path = str(file_path.relative_to(self.project_root))
+            relative_file_path = file_path.relative_to(self.project_root).as_posix()
         except ValueError:
             raise ValueError(
                 f"File path {file_path} must be relative to project root {self.project_root} for multilspy."

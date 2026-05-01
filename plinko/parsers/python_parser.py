@@ -3,11 +3,11 @@ import ast
 import asyncio
 import threading
 from pathlib import Path
+from urllib.parse import unquote, urlparse
 
 from logzero import logger
 
 from plinko import code_parser
-from plinko.helpers import gen_variants, get_coverage
 from plinko.lsp_adapter import LSPAdapter
 
 
@@ -104,7 +104,11 @@ class Function:
                             self.calls.add(f"UNRESOLVED:{ast.unparse(call_func)} (no URI)")
                             continue
 
-                        def_path = Path(def_uri.replace('file://', ''))
+                        parsed = urlparse(def_uri)
+                        if parsed.scheme != "file":
+                            self.calls.add(f"UNRESOLVED:{ast.unparse(call_func)} (non-file URI)")
+                            continue
+                        def_path = Path(unquote(parsed.path))
                         
                         # Attempt to form a representative string for the call
                         # This is a simplification; robustly getting the FQN from LSP is harder
@@ -168,6 +172,7 @@ class CodeParser:
         self.create_on_instance = parent_parser.create_on_instance
         self.entities = parent_parser.entities
         self._search_aggressiveness = kwargs.get("search_aggressiveness", "low")
+        self.max_depth = kwargs.get("max_depth", 0)
         self.lsp_adapter = LSPAdapter(project_root=self.parent_parser.project_root)
         self.classes, self.methods, self.covers = {}, {}, {}
         if code_file not in code_parser.PARSED_FILES:
